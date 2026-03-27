@@ -1,0 +1,30 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec.bak
+
+# Runtime data
+data/
+chats/
+backups/
+vectordb/
+hf_cache/
+model_cache/
+
+# OS/editor
+.vscode/
+.idea/
+*.log
+
+# Local secrets
+.env
+.env.*
+!.env.example
