@@ -20,6 +20,7 @@ from services.search_facade import (
     should_use_web_search,
     web_search_with_status,
 )
+from services.stock_analysis_service import is_stock_analysis_query, run_technical_analysis
 
 
 class ChatResponseWorker(QThread):
@@ -96,10 +97,24 @@ class ChatResponseWorker(QThread):
                 )
                 return
         elif request_type == "web":
-            self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
-            search_result = self._run_web_search(last_user_message)
-            if search_result is None:
-                return
+            # ★ 기술적 분석 요청이면 yfinance 분석을 먼저 시도
+            if is_stock_analysis_query(last_user_message):
+                self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
+                analysis_text, analysis_error = run_technical_analysis(last_user_message)
+                if analysis_text:
+                    search_result = analysis_text
+                    request_type = "stock_analysis"
+                elif analysis_error:
+                    # 종목 미인식 또는 데이터 오류 → 일반 웹 검색으로 fallback
+                    self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
+                    search_result = self._run_web_search(last_user_message)
+                    if search_result is None:
+                        return
+            else:
+                self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
+                search_result = self._run_web_search(last_user_message)
+                if search_result is None:
+                    return
         elif request_type == "error":
             self.search_status.emit("🧯 오류 내용을 분석하는 중입니다...")
         elif request_type == "sql":
@@ -115,10 +130,23 @@ class ChatResponseWorker(QThread):
             if path_match:
                 search_result = summarize_project_folder(path_match.group(0))
         elif should_use_web_search(last_user_message):
-            self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
-            search_result = self._run_web_search(last_user_message)
-            if search_result is None:
-                return
+            # ★ 기술적 분석 요청이면 yfinance 분석을 먼저 시도
+            if is_stock_analysis_query(last_user_message):
+                self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
+                analysis_text, analysis_error = run_technical_analysis(last_user_message)
+                if analysis_text:
+                    search_result = analysis_text
+                    request_type = "stock_analysis"
+                elif analysis_error:
+                    self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
+                    search_result = self._run_web_search(last_user_message)
+                    if search_result is None:
+                        return
+            else:
+                self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
+                search_result = self._run_web_search(last_user_message)
+                if search_result is None:
+                    return
 
         messages = self._build_messages(last_user_message, now_str, request_type, document_context, search_result)
         payload = {"model": self.model_name, "messages": messages, "stream": True}
@@ -138,6 +166,8 @@ class ChatResponseWorker(QThread):
 
             if document_context:
                 full_response = "[📚 내부 문서 문맥을 반영했습니다]\n\n" + full_response
+            elif request_type == "stock_analysis":
+                full_response = "[📈 실시간 기술적 분석 결과를 반영했습니다]\n\n" + full_response
             elif search_result:
                 full_response = "[🔍 검색 결과를 반영했습니다]\n\n" + full_response
             self.finished.emit(full_response)
@@ -239,6 +269,34 @@ class ChatResponseWorker(QThread):
                         "- 필요하면 MyBatis mapper 스타일 반영\n"
                         "- 코드는 fenced code block 으로 작성\n"
                         "- 코드 주석은 한국어로 작성"
+                    ),
+                }
+            )
+            return messages
+
+        if request_type == "stock_analysis" and search_result:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"[현재 시각: {now_str}]\n\n"
+                        f"마스터의 질문: {last_user_message}\n\n"
+                        "[실시간 기술적 분석 데이터]\n"
+                        f"{search_result}\n\n"
+                        "---\n"
+                        "위 기술적 분석 데이터를 바탕으로 아래 형식에 맞춰 한국어로 답변해 주세요.\n\n"
+                        "## 종합 현황\n"
+                        "(현재가, 등락 방향 한 줄 요약)\n\n"
+                        "## 지표별 해석\n"
+                        "- RSI: (과매수/과매도/중립 여부와 의미)\n"
+                        "- MACD: (골든크로스/데드크로스 여부와 모멘텀 방향)\n"
+                        "- 볼린저밴드: (밴드 내 위치와 의미)\n"
+                        "- 이동평균: (정배열/역배열 여부와 추세 방향)\n"
+                        "- 거래량: (평균 대비 거래량 활성도)\n\n"
+                        "## 종합 의견\n"
+                        "(위 지표들을 종합한 단기 기술적 흐름 해석. 단, 투자 조언은 하지 마세요.)\n\n"
+                        "⚠️ 주의사항: 이 분석은 기술적 지표에 기반한 현황 해석이며, "
+                        "실제 투자 결정은 반드시 마스터 본인이 판단하셔야 합니다."
                     ),
                 }
             )
