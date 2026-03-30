@@ -1,6 +1,6 @@
-# Jarvis: 수석 엔지니어 비서
+# Jarvis: 비서
 
-Jarvis는 Windows 환경에서 실행하는 데스크톱 전용 '수석 엔지니어 비서' AI 도우미입니다.
+Jarvis는 Windows 환경에서 실행하는 데스크톱 전용 '비서' AI 도우미입니다.
 
 ## 📌 1. 프로젝트 개요 (Introduction)
 
