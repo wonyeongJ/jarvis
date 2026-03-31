@@ -251,7 +251,7 @@ class JarvisMainWindow(QMainWindow):
         title_layout.setContentsMargins(0, 0, 0, 8)
         title_layout.setSpacing(8)
 
-        icon_path = resource_path("images/jarvis_icon.jpg")
+        icon_path = resource_path("images/pngegg.png")
         if os.path.exists(icon_path):
             icon_label = QLabel()
             pixmap = QPixmap(icon_path).scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
