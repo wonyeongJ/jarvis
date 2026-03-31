@@ -10,7 +10,7 @@ import re
 
 import markdown2
 from pygments.formatters import HtmlFormatter
-from PyQt5.QtCore import QTimer, QRect, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QObject, QTimer, QRect, QSize, Qt, pyqtSignal, QRunnable, QThreadPool
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QApplication,
@@ -118,6 +118,29 @@ class MarkdownRenderer:
 
         html = html_re.sub(r'<div class="codehilite">.*?</div>', wrap_code, html, flags=html_re.DOTALL)
         return f"{full_style}{html}"
+
+
+class MarkdownRenderSignals(QObject):
+    """QRunnable에서 결과를 전달받기 위한 시그널 전용 컨테이너입니다."""
+    finished = pyqtSignal(str)
+
+
+class MarkdownRenderWorker(QRunnable):
+    """마크다운 렌더링을 백그라운드 스레드풀에서 수행하는 워커입니다."""
+
+    def __init__(self, text):
+        super().__init__()
+        self.text = text
+        self.signals = MarkdownRenderSignals()
+
+    def run(self):
+        """실제 렌더링을 실행하고 결과를 시그널로 보냅니다."""
+        try:
+            rendered_html = MarkdownRenderer.render(self.text)
+            self.signals.finished.emit(rendered_html)
+        except Exception:
+            # 실패 시 일반 텍스트라도 반환
+            self.signals.finished.emit(self.text)
 
 
 class AutoExpandingTextEdit(QTextEdit):
@@ -545,6 +568,9 @@ class ChatMessageBubble(QWidget):
         super().__init__()
         self.is_user = is_user
         self.text = text
+        self._is_rendering = False
+        self._pending_text = None
+        
         time_str = datetime.datetime.now().strftime("%H:%M")
 
         outer = QVBoxLayout(self)
@@ -558,7 +584,7 @@ class ChatMessageBubble(QWidget):
             label = QLabel(text)
             label.setWordWrap(True)
             label.setMinimumWidth(80)
-            label.setMaximumWidth(760)  # 사용자 질문 말풍선이 너무 일찍 줄바꿈되지 않도록 길이 상향 조정
+            label.setMaximumWidth(760)
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setStyleSheet(USER_MESSAGE_STYLE)
@@ -572,6 +598,7 @@ class ChatMessageBubble(QWidget):
             outer.addWidget(time_label)
         else:
             self.browser = AutoTextBrowser()
+            # 초기 렌더링은 동기로 진행하거나 빈 상태로 시작
             self.browser.setHtml(MarkdownRenderer.render(text))
             self.browser.setMaximumWidth(680)
             self.browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -589,6 +616,35 @@ class ChatMessageBubble(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
 
     def update_text(self, text):
-        """스트리밍 중인 어시스턴트 말풍선 내용을 갱신합니다."""
+        """스트리밍 중인 어시스턴트 말풍선 내용을 비동기로 갱신합니다."""
+        if not hasattr(self, "browser"):
+            return
+
+        if self._is_rendering:
+            # 이미 렌더링 중이면 대기열에 저장
+            self._pending_text = text
+            return
+
+        self._start_async_render(text)
+
+    def _start_async_render(self, text):
+        """글로벌 스레드풀을 통해 비동기 렌더링 작업을 예약합니다."""
+        self._is_rendering = True
+        self.text = text
+
+        worker = MarkdownRenderWorker(text)
+        worker.signals.finished.connect(self._on_render_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_render_finished(self, rendered_html):
+        """렌더링이 완료되면 UI를 갱신하고 대기 중인 작업이 있는지 확인합니다."""
         if hasattr(self, "browser"):
-            self.browser.setHtml(MarkdownRenderer.render(text))
+            self.browser.setHtml(rendered_html)
+        
+        self._is_rendering = False
+        
+        # 대기 중인 텍스트가 있으면 다시 렌더링 시작
+        if self._pending_text is not None:
+            next_text = self._pending_text
+            self._pending_text = None
+            self._start_async_render(next_text)
