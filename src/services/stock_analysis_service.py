@@ -68,20 +68,39 @@ KOREAN_STOCK_MAP: dict[str, tuple[str, str]] = {
     "메타": ("META", "Meta"),
 }
 
-# ─── 기술적 분석 질문 감지 키워드 ───────────────────────────────────────────
-_ANALYSIS_KEYWORDS = [
+# ─── 기술적 분석 질문 감지 키워드 ───────────────────────────────────────
+# · 두 그룹 모두 포함되어야 True 로 판단합니다.
+_ANALYSIS_ACTION_KEYWORDS = [
     "기술적 분석", "기술분석", "분석해줘", "분석해봐", "분석해",
-    "예측해줘", "예측해봐", "예측해", "전망해줘", "전망",
+    "예측해줘", "예측해봐", "예측해", "예상해줘", "예상해봐", "예상해",
+    "전망해줘", "전망",
     "rsi", "macd", "볼린저", "이동평균", "차트 분석",
     "매수 신호", "매도 신호", "골든크로스", "데드크로스",
     "지표", "과매수", "과매도",
 ]
 
+# 주식 맥락 확인용 키워드 — 이 중 하나 이상 있어야 주식 분석으로 인식
+_STOCK_CONTEXT_KEYWORDS = [
+    "주가", "주식", "종목", "코스피", "코스닥", "주", "우선주",
+    "삼성", "스페트", "삼성전자", "하이닉스", "음성", "네이버", "컨테츠",
+    "카카오", "현대차", "기아", "엔비디아", "테슬라", "애플", "엔비디아",
+    "에코프로", "셀트리온", "포스코", "엔비디아", "메타", "마이크로소프트",
+]
+
 
 def is_stock_analysis_query(text: str) -> bool:
-    """기술적 분석 요청 여부를 판단합니다."""
+    """기술적 분석 요청 여부를 판단합니다.
+
+    기술적 분석 액션 키워드(뺄 분석해줘, RSI 등)와
+    주식 맥락 키워드(주가, 코스피, 삼성전자 등)가
+    모두 포함되어야 True 를 반환합니다.
+    날씨 예측처럼 주식 맥락 없이 단순히 '예측해줘'만 있는 쿼리는 False 를 반환합니다.
+    """
     t = text.lower()
-    return any(k in t for k in _ANALYSIS_KEYWORDS)
+    has_action = any(k in t for k in _ANALYSIS_ACTION_KEYWORDS)
+    # 주식 맥락: 직접 키워드 취합 OR 종목명 사전매칭
+    has_stock_context = any(k in t for k in _STOCK_CONTEXT_KEYWORDS) or any(name in t for name in KOREAN_STOCK_MAP)
+    return has_action and has_stock_context
 
 
 def _resolve_ticker(query: str) -> tuple[Optional[str], Optional[str]]:

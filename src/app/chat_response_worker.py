@@ -63,6 +63,19 @@ class ChatResponseWorker(QThread):
         document_context = None
         search_result = None
 
+        # ★ 기술적 분석 요청은 request_type에 무관하게 최우선으로 처리
+        if is_stock_analysis_query(last_user_message):
+            self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
+            analysis_text, analysis_error = run_technical_analysis(last_user_message)
+            if analysis_text:
+                search_result = analysis_text
+                request_type = "stock_analysis"
+            elif analysis_error:
+                # 종목 미인식 등 → 조용히 웹 검색으로 fallback
+                search_result = self._run_web_search(last_user_message)
+                if search_result is None:
+                    return
+
         if request_type == "pc":
             self.search_status.emit("🔎 PC 파일을 검색하는 중입니다...")
             noise_pattern = r"(\s*내\s*pc에서|\s*제\s*pc에서|\s*내\s*컴퓨터에서|\s*제\s*컴퓨터에서|\s*내\s*pc|\s*제\s*pc|\s*내\s*컴퓨터|\s*제\s*컴퓨터|찾아줘|검색해줘|어디\s*있어|있나|있어|파일|문서)"
@@ -284,7 +297,11 @@ class ChatResponseWorker(QThread):
                         "[실시간 기술적 분석 데이터]\n"
                         f"{search_result}\n\n"
                         "---\n"
-                        "위 기술적 분석 데이터를 바탕으로 아래 형식에 맞춰 한국어로 답변해 주세요.\n\n"
+                        "위 기술적 분석 데이터를 바탕으로 아래 형식에 맞춰 답변해 주세요.\n\n"
+                        "⚠️ 필수 준수 사항 (어기면 틀린 답변입니다):\n"
+                        "1. 답변 전체를 반드시 순수한 한국어로만 작성하세요. 한자·중국어·일본어 등 어떤 외국 문자도 절대 포함하지 마세요.\n"
+                        "2. 출처(URL, 링크, '※ 출처:' 등)는 절대 작성하지 마세요. 데이터는 이미 신뢰할 수 있는 실시간 소스에서 직접 수집되었습니다.\n"
+                        "3. 위 데이터에 없는 내용은 상상하거나 지어내지 마세요.\n\n"
                         "## 종합 현황\n"
                         "(현재가, 등락 방향 한 줄 요약)\n\n"
                         "## 지표별 해석\n"
@@ -294,13 +311,12 @@ class ChatResponseWorker(QThread):
                         "- 이동평균: (정배열/역배열 여부와 추세 방향)\n"
                         "- 거래량: (평균 대비 거래량 활성도)\n\n"
                         "## 종합 의견\n"
-                        "(위 지표들을 종합한 단기 기술적 흐름 해석. 단, 투자 조언은 하지 마세요.)\n\n"
-                        "⚠️ 주의사항: 이 분석은 기술적 지표에 기반한 현황 해석이며, "
-                        "실제 투자 결정은 반드시 마스터 본인이 판단하셔야 합니다."
+                        "(위 지표들을 종합한 단기 기술적 현황 해석. 투자 조언은 하지 마세요.)"
                     ),
                 }
             )
             return messages
+
 
         if request_type == "folder" and search_result:
             messages.append(
@@ -341,8 +357,7 @@ class ChatResponseWorker(QThread):
                         "        아래 두 문장만 그대로 출력하세요:\n"
                         "        '검색 결과에서 해당 정보를 찾지 못했습니다.\n"
                         "         일반적으로 날씨 예보는 7~10일 전부터 확인 가능합니다. 죄송합니다.'\n"
-                        "규칙 3. [출처] 정확한 정보를 찾았을 때만 '[웹사이트명](URL)' 형식으로 답변 끝에 출처를 표시하세요.\n"
-                        "        정보를 찾지 못했을 때는 출처를 절대 표시하지 마세요.\n"
+                        "규칙 3. [출처] 출처(URL, 링크, '✖ 출처:' 등)는 절대 표시하지 마세요. 검색된 정보 자체를 자연스러운 답변에 녹여 전달하는 것으로 충분합니다.\n"
                         "규칙 4. [단위] 화씨(°F) 등 미국식 단위는 한국 기준(°C, km 등)으로 변환해 자연스럽게 녹여내세요.\n"
                         "규칙 5. [문체] 직역투나 중복 표현을 피해 자연스러운 한국어로 작성하세요.\n"
                     ),
