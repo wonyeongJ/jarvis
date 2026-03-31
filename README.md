@@ -202,16 +202,16 @@ scripts\build_jarvis.bat
 
 | 모델 | 주요 역할 | 사용 환경 | 한 줄 요약 |
 | :--- | :--- | :--- | :--- |
-| **Claude** | **아키텍처 및 설계** | 웹(Web), VSCode, Antigravity | "설계 감각이 탁월한 시니어 개발자" — 복잡한 리팩토링과 구조 정의에 강점 |
-| **GPT (4/5)** | **구현 및 디버깅** | 웹(Web), VSCode, Antigravity | "실무에 강한 올라운더" — 전반적인 코드 생성 및 도구 연동, 에러 수정 편의성 |
-| **Codex** | **보일러플레이트** | VSCode, Antigravity | "손이 빠른 주니어" — 반복적인 코드 패턴과 기초 구조를 순식간에 생성 |
-| **Gemini** | **리서치 및 자료조사** | 웹(Web), Antigravity | "박학다식한 보조역" — 방대한 문서 분석 및 외부 레퍼런스 수집에 특화 |
+| **Claude** | **아키텍처 및 설계** | 웹(Web), VSCode, Google Antigravity | "설계 감각이 탁월한 시니어 개발자" — 복잡한 리팩토링과 구조 정의에 강점 |
+| **GPT (4/5)** | **구현 및 디버깅** | 웹(Web), VSCode, Google Antigravity | "실무에 강한 올라운더" — 전반적인 코드 생성 및 도구 연동, 에러 수정 편의성 |
+| **Codex** | **보일러플레이트** | VSCode, Google Antigravity | "손이 빠른 주니어" — 반복적인 코드 패턴과 기초 구조를 순식간에 생성 |
+| **Gemini** | **리서치 및 자료조사** | 웹(Web), Google Antigravity | "박학다식한 보조역" — 방대한 문서 분석 및 외부 레퍼런스 수집에 특화 |
 
 ### 🛠️ Agent 및 개발 환경 (IDE)
 
 *   **VSCode + Extensions**: 프로젝트의 최종 통제소이자 디버깅 및 패키징을 위한 핵심 환경입니다.
 *   **Cline (VSCode Plugin)**: VSCode 플러그인 형태로 활용하여 "수정 ➡️ 실행 ➡️ 에러 수정"으로 이어지는 반자동 개발 환경을 구축했습니다.
-*   **Antigravity (Agent IDE)**: 구글 안티그래비티 플러그인 및 에이전트 기반의 자동화 환경을 통해 빠른 프로토타이핑과 프로젝트 단위의 코드 제어를 수행했습니다.
+*   **Antigravity (Agent IDE)**: Google Antigravity 플러그인 및 에이전트 기반의 자동화 환경을 통해 빠른 프로토타이핑과 프로젝트 단위의 코드 제어를 수행했습니다.
 
 ### ⚙️ Vibe Coding 핵심 인사이트
 
@@ -230,5 +230,5 @@ scripts\build_jarvis.bat
 ### 🚀 추천 개발 파이프라인 (Experience-based)
 
 ```text
-Claude (설계/리팩토링) ➡️ GPT (코드 작성/디버깅) ➡️ Cline (반복 자동화) ➡️ VSCode (최종 검증)
+Claude (설계/리팩토링) ➡️ GPT (코드 작성/디버깅) ➡️ Cline (반복 자동화) ➡️ VSCode or Google Antigravity (최종 검증)
 ```
