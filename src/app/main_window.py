@@ -11,7 +11,7 @@ import sys
 import threading
 import warnings
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -118,6 +118,8 @@ WELCOME_MESSAGE = """
 class JarvisMainWindow(QMainWindow):
     """Main application window."""
 
+    everything_status_signal = pyqtSignal(bool)
+
     def __init__(self):
         """Initialize window state and timers."""
         super().__init__()
@@ -139,7 +141,9 @@ class JarvisMainWindow(QMainWindow):
         threading.Thread(target=launch_everything, daemon=True).start()
         threading.Thread(target=warm_up_rag_backend, daemon=True).start()
 
-        self.everything_timer = QTimer()
+        self.everything_status_signal.connect(self._handle_everything_status)
+        self.check_thread = None
+        self.everything_timer = QTimer(self)
         self.everything_timer.timeout.connect(self._update_everything_status)
         self.everything_timer.start(2000)
 
@@ -150,18 +154,25 @@ class JarvisMainWindow(QMainWindow):
         self.start_new_chat()
 
     def _update_everything_status(self):
-        """Reflect Everything readiness in the header badge."""
+        """Poll Everything availability safely."""
+        if self.check_thread and self.check_thread.is_alive():
+            return
 
-        def check_status():
+        def check():
             ready = is_everything_available()
-            if ready:
-                self.everything_badge.setText("🔎 PC 검색 준비 완료")
-                self.everything_badge.setStyleSheet(STATUS_BADGE_READY_STYLE)
-                self.everything_timer.stop()
-            else:
-                self.everything_badge.setText("⏳ PC 검색 준비 중")
+            self.everything_status_signal.emit(ready)
 
-        threading.Thread(target=check_status, daemon=True).start()
+        self.check_thread = threading.Thread(target=check, daemon=True)
+        self.check_thread.start()
+
+    def _handle_everything_status(self, ready):
+        """Reflect Everything readiness in the header badge."""
+        if ready:
+            self.everything_badge.setText("🔎 PC 검색 준비 완료")
+            self.everything_badge.setStyleSheet(STATUS_BADGE_READY_STYLE)
+            self.everything_timer.stop()
+        else:
+            self.everything_badge.setText("⏳ PC 검색 준비 중")
 
     def _show_chat_list_tooltip(self, event):
         """Show the full chat title as a tooltip."""

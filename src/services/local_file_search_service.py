@@ -1,4 +1,4 @@
-﻿"""Everything 기반 로컬 파일 검색을 담당하는 서비스 모듈입니다."""
+"""Everything 기반 로컬 파일 검색을 담당하는 서비스 모듈입니다."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from services.file_action_service import open_parent_folder, open_path
 
 EVERYTHING_PORT = get_everything_port()
 EVERYTHING_BASE_DIR = resource_path("everything")
-EVERYTHING_READY_MIN_TOTAL_RESULTS = 1000
+EVERYTHING_READY_MIN_TOTAL_RESULTS = 100
 EVERYTHING_RESULT_LIMIT = 100
 EVERYTHING_SEARCH_RETRY_STEPS = [
     {"count": 50, "timeout": (0.5, 6)},
@@ -77,11 +77,22 @@ def start_everything():
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if "Everything.exe" in result.stdout:
-            return
+            # 프로세스는 있지만 응답이 없는 상태이므로 재시작 시도
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "Everything.exe"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            time.sleep(1)
     except Exception:
         pass
 
-    subprocess.Popen([executable_path, "-startup"], cwd=EVERYTHING_BASE_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+    # Everything.ini의 설정을 존중하여 백그라운드(-startup)로만 실행합니다.
+    subprocess.Popen(
+        [executable_path, "-startup"],
+        cwd=EVERYTHING_BASE_DIR,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 def wait_for_everything(attempts: int = 40, delay_seconds: float = 0.5):
