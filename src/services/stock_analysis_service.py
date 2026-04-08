@@ -1,110 +1,157 @@
-"""yfinance 기반 주식 기술적 분석 서비스 모듈.
+﻿"""Stock quote/analysis service built on yfinance.
 
-사용자가 '예측', '분석', '기술적 분석' 등을 요청하면 이 모듈이 동작합니다.
-yfinance로 실시간 OHLCV 데이터를 받아와 RSI, MACD, 볼린저밴드를 계산한 뒤,
-LLM이 해석할 수 있는 텍스트 형태로 반환합니다.
-
-⚠️ 이 모듈은 투자 조언을 하지 않습니다.
-   계산된 기술적 지표를 근거로 한 현황 해석만 제공합니다.
+This module keeps stock parsing deterministic:
+- price lookup requests -> direct quote text
+- analysis/prediction requests -> technical indicators for LLM
 """
 from __future__ import annotations
 
-import re
+import importlib
+import subprocess
+import sys
 from typing import Optional
 
-# ─── 주요 한국 주식 종목명 → 야후파이낸스 티커 사전 ─────────────────────────
+
+def _u(s: str) -> str:
+    """Decode ASCII unicode-escape literals to Korean text."""
+    return s.encode("ascii").decode("unicode_escape")
+
+
 KOREAN_STOCK_MAP: dict[str, tuple[str, str]] = {
-    # 이름: (티커코드, 공식명칭)
-    "삼성전자": ("005930.KS", "삼성전자"),
-    "삼성": ("005930.KS", "삼성전자"),
-    "sk하이닉스": ("000660.KS", "SK하이닉스"),
-    "하이닉스": ("000660.KS", "SK하이닉스"),
-    "lg에너지솔루션": ("373220.KS", "LG에너지솔루션"),
-    "카카오": ("035720.KQ", "카카오"),
-    "카카오뱅크": ("323410.KS", "카카오뱅크"),
-    "카카오페이": ("377300.KS", "카카오페이"),
-    "네이버": ("035420.KS", "NAVER"),
+    _u("\\uc0bc\\uc131\\uc804\\uc790"): ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
+    _u("\\uc0bc\\uc131"): ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
+    "samsung": ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
+    _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4"): ("000660.KS", _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4")),
+    _u("\\ud558\\uc774\\ub2c9\\uc2a4"): ("000660.KS", _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4")),
+    _u("\\ub124\\uc774\\ubc84"): ("035420.KS", "NAVER"),
     "naver": ("035420.KS", "NAVER"),
-    "현대차": ("005380.KS", "현대자동차"),
-    "현대자동차": ("005380.KS", "현대자동차"),
-    "기아": ("000270.KS", "기아"),
-    "기아차": ("000270.KS", "기아"),
-    "포스코": ("005490.KS", "POSCO홀딩스"),
-    "포스코홀딩스": ("005490.KS", "POSCO홀딩스"),
-    "lg화학": ("051910.KS", "LG화학"),
-    "셀트리온": ("068270.KS", "셀트리온"),
-    "삼성바이오": ("207940.KS", "삼성바이오로직스"),
-    "삼성바이오로직스": ("207940.KS", "삼성바이오로직스"),
-    "kb금융": ("105560.KS", "KB금융"),
-    "신한지주": ("055550.KS", "신한지주"),
-    "하나지주": ("086790.KS", "하나금융지주"),
-    "우리금융": ("316140.KS", "우리금융지주"),
-    "kt": ("030200.KS", "KT"),
-    "skt": ("017670.KS", "SK텔레콤"),
-    "sk텔레콤": ("017670.KS", "SK텔레콤"),
-    "lg전자": ("066570.KS", "LG전자"),
-    "두산에너빌리티": ("034020.KS", "두산에너빌리티"),
-    "한국전력": ("015760.KS", "한국전력"),
-    "한화에어로스페이스": ("012450.KS", "한화에어로스페이스"),
-    "한미반도체": ("042700.KS", "한미반도체"),
-    "에코프로": ("086520.KQ", "에코프로"),
-    "에코프로비엠": ("247540.KQ", "에코프로비엠"),
-    # 지수
-    "코스피": ("^KS11", "KOSPI"),
+    _u("\\uce74\\uce74\\uc624"): ("035720.KQ", _u("\\uce74\\uce74\\uc624")),
+    _u("\\ud604\\ub300\\ucc28"): ("005380.KS", _u("\\ud604\\ub300\\uc790\\ub3d9\\ucc28")),
+    _u("\\uae30\\uc544"): ("000270.KS", _u("\\uae30\\uc544")),
+    _u("\\ucf54\\uc2a4\\ud53c"): ("^KS11", "KOSPI"),
     "kospi": ("^KS11", "KOSPI"),
-    "코스닥": ("^KQ11", "KOSDAQ"),
+    _u("\\ucf54\\uc2a4\\ub2e5"): ("^KQ11", "KOSDAQ"),
     "kosdaq": ("^KQ11", "KOSDAQ"),
-    # 미국 빅테크 (달러 기준)
-    "애플": ("AAPL", "Apple"),
+    _u("\\uc560\\ud50c"): ("AAPL", "Apple"),
     "apple": ("AAPL", "Apple"),
     "aapl": ("AAPL", "Apple"),
-    "엔비디아": ("NVDA", "NVIDIA"),
+    _u("\\uc5d4\\ube44\\ub514\\uc544"): ("NVDA", "NVIDIA"),
     "nvidia": ("NVDA", "NVIDIA"),
     "nvda": ("NVDA", "NVIDIA"),
-    "테슬라": ("TSLA", "Tesla"),
+    _u("\\ud14c\\uc2ac\\ub77c"): ("TSLA", "Tesla"),
     "tesla": ("TSLA", "Tesla"),
-    "마이크로소프트": ("MSFT", "Microsoft"),
-    "구글": ("GOOGL", "Google(Alphabet)"),
-    "메타": ("META", "Meta"),
+    "tsla": ("TSLA", "Tesla"),
+    _u("\\ub9c8\\uc774\\ud06c\\ub85c\\uc18c\\ud504\\ud2b8"): ("MSFT", "Microsoft"),
+    "microsoft": ("MSFT", "Microsoft"),
+    "msft": ("MSFT", "Microsoft"),
 }
 
-# ─── 기술적 분석 질문 감지 키워드 ───────────────────────────────────────
-# · 두 그룹 모두 포함되어야 True 로 판단합니다.
-_ANALYSIS_ACTION_KEYWORDS = [
-    "기술적 분석", "기술분석", "분석해줘", "분석해봐", "분석해",
-    "예측해줘", "예측해봐", "예측해", "예상해줘", "예상해봐", "예상해",
-    "전망해줘", "전망",
-    "rsi", "macd", "볼린저", "이동평균", "차트 분석",
-    "매수 신호", "매도 신호", "골든크로스", "데드크로스",
-    "지표", "과매수", "과매도",
+ANALYSIS_ACTION_KEYWORDS = [
+    _u("\\ubd84\\uc11d"),
+    _u("\\uae30\\uc220\\uc801 \\ubd84\\uc11d"),
+    _u("\\uc608\\uce21"),
+    _u("\\uc804\\ub9dd"),
+    "rsi",
+    "macd",
+    _u("\\ubcfc\\ub9b0\\uc800"),
 ]
 
-# 주식 맥락 확인용 키워드 — 이 중 하나 이상 있어야 주식 분석으로 인식
-_STOCK_CONTEXT_KEYWORDS = [
-    "주가", "주식", "종목", "코스피", "코스닥", "주", "우선주",
-    "삼성", "스페트", "삼성전자", "하이닉스", "음성", "네이버", "컨테츠",
-    "카카오", "현대차", "기아", "엔비디아", "테슬라", "애플", "엔비디아",
-    "에코프로", "셀트리온", "포스코", "엔비디아", "메타", "마이크로소프트",
+PRICE_ACTION_KEYWORDS = [
+    _u("\\uc8fc\\uac00"),
+    _u("\\uc2dc\\uc138"),
+    _u("\\uac00\\uaca9"),
+    _u("\\uc5bc\\ub9c8"),
+    _u("\\ud604\\uc7ac\\uac00"),
 ]
+
+STOCK_CONTEXT_KEYWORDS = [
+    _u("\\uc8fc\\uc2dd"),
+    _u("\\uc885\\ubaa9"),
+    _u("\\uc8fc\\uac00"),
+    _u("\\ucf54\\uc2a4\\ud53c"),
+    _u("\\ucf54\\uc2a4\\ub2e5"),
+]
+
+
+def _run_install_command(command: list[str], package_name: str) -> tuple[bool, Optional[str]]:
+    try:
+        result = subprocess.run(
+            command + [package_name],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except Exception as exc:
+        return False, f"자동 설치 실행 실패: {exc}"
+
+    if result.returncode == 0:
+        return True, None
+
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    raw_details = stderr or stdout or "원인을 확인하지 못했습니다."
+    lines = [line.strip() for line in raw_details.splitlines() if line.strip()]
+    details = " / ".join(lines[-3:]) if lines else raw_details
+    return False, f"자동 설치 실패: {details}"
+
+
+def _auto_install_package(package_name: str) -> tuple[bool, Optional[str]]:
+    """Try installing a missing package in dev/runtime Python."""
+    ok, error = _run_install_command([sys.executable, "-m", "pip", "install"], package_name)
+    if ok:
+        return True, None
+
+    if not getattr(sys, "frozen", False):
+        return False, error
+
+    for base in (["py", "-m", "pip", "install"], ["python", "-m", "pip", "install"]):
+        ok, fallback_error = _run_install_command(base, package_name)
+        if ok:
+            return True, None
+        error = fallback_error
+
+    return False, error
+
+
+def _import_yfinance():
+    """Import yfinance, attempting one-time auto install when missing."""
+    try:
+        return importlib.import_module("yfinance"), None
+    except ImportError:
+        ok, install_error = _auto_install_package("yfinance")
+        if not ok:
+            if install_error:
+                return None, (
+                    "`yfinance` 패키지가 설치되지 않았고 자동 설치에도 실패했습니다.\n"
+                    f"{install_error}"
+                )
+            return None, "`yfinance` 패키지가 설치되지 않았습니다."
+        try:
+            return importlib.import_module("yfinance"), None
+        except Exception as exc:
+            return None, f"`yfinance` 설치 후 로드에 실패했습니다: {exc}"
+
+
+def _has_stock_context(text: str) -> bool:
+    t = text.lower()
+    if any(k in t for k in STOCK_CONTEXT_KEYWORDS):
+        return True
+    return any(name in t for name in KOREAN_STOCK_MAP)
 
 
 def is_stock_analysis_query(text: str) -> bool:
-    """기술적 분석 요청 여부를 판단합니다.
-
-    기술적 분석 액션 키워드(뺄 분석해줘, RSI 등)와
-    주식 맥락 키워드(주가, 코스피, 삼성전자 등)가
-    모두 포함되어야 True 를 반환합니다.
-    날씨 예측처럼 주식 맥락 없이 단순히 '예측해줘'만 있는 쿼리는 False 를 반환합니다.
-    """
     t = text.lower()
-    has_action = any(k in t for k in _ANALYSIS_ACTION_KEYWORDS)
-    # 주식 맥락: 직접 키워드 취합 OR 종목명 사전매칭
-    has_stock_context = any(k in t for k in _STOCK_CONTEXT_KEYWORDS) or any(name in t for name in KOREAN_STOCK_MAP)
-    return has_action and has_stock_context
+    has_action = any(k in t for k in ANALYSIS_ACTION_KEYWORDS)
+    return has_action and _has_stock_context(t)
+
+
+def is_stock_price_query(text: str) -> bool:
+    t = text.lower()
+    has_action = any(k in t for k in PRICE_ACTION_KEYWORDS)
+    return has_action and _has_stock_context(t)
 
 
 def _resolve_ticker(query: str) -> tuple[Optional[str], Optional[str]]:
-    """질문 텍스트에서 종목 이름을 찾아 티커와 공식명칭을 반환합니다."""
     q_lower = query.lower().replace(" ", "")
     for name, (ticker, official_name) in KOREAN_STOCK_MAP.items():
         if name.replace(" ", "") in q_lower:
@@ -113,7 +160,6 @@ def _resolve_ticker(query: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _calc_rsi(close, period: int = 14):
-    """RSI(상대강도지수)를 계산합니다."""
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(window=period).mean()
     loss = (-delta.clip(upper=0)).rolling(window=period).mean()
@@ -122,7 +168,6 @@ def _calc_rsi(close, period: int = 14):
 
 
 def _calc_macd(close, fast: int = 12, slow: int = 26, signal: int = 9):
-    """MACD 라인, 시그널 라인, 히스토그램을 계산합니다."""
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -131,120 +176,84 @@ def _calc_macd(close, fast: int = 12, slow: int = 26, signal: int = 9):
 
 
 def _calc_bollinger(close, period: int = 20, std_mult: float = 2.0):
-    """볼린저밴드 상단/중간(SMA)/하단을 계산합니다."""
     sma = close.rolling(window=period).mean()
     std = close.rolling(window=period).std()
     return sma + std_mult * std, sma, sma - std_mult * std
 
 
-def run_technical_analysis(query: str) -> tuple[Optional[str], Optional[str]]:
-    """주식 기술적 분석을 수행하고 LLM에 전달할 텍스트를 반환합니다.
-
-    Returns:
-        (analysis_text, error_message) — 성공 시 error는 None, 실패 시 text는 None.
-    """
-    try:
-        import yfinance as yf  # noqa: PLC0415
-    except ImportError:
-        return None, (
-            "`yfinance` 패키지가 설치되지 않았습니다.\n"
-            "가상환경에서 `pip install yfinance` 를 실행한 뒤 재시작해 주세요."
-        )
+def run_stock_quote(query: str) -> tuple[Optional[str], Optional[str]]:
+    yf, import_error = _import_yfinance()
+    if import_error:
+        return None, import_error
 
     ticker_code, company_name = _resolve_ticker(query)
     if not ticker_code:
-        return None, (
-            "종목명을 인식하지 못했습니다.\n"
-            "예) '삼성전자 기술적 분석해줘', '네이버 RSI 알려줘'"
+        return None, _u("\\uc885\\ubaa9\\uba85\\uc744 \\uc778\\uc2dd\\ud558\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4. \\uc608: '\\uc0bc\\uc131\\uc804\\uc790 \\uc8fc\\uac00 \\uc54c\\ub824\\uc918'")
+
+    try:
+        df = yf.Ticker(ticker_code).history(period="5d", interval="1d")
+        if df.empty:
+            return None, _u("\\uac00\\uaca9 \\ub370\\uc774\\ud130\\ub97c \\uac00\\uc838\\uc624\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4.")
+
+        close = df["Close"]
+        current = float(close.iloc[-1])
+        prev = float(close.iloc[-2]) if len(close) > 1 else current
+        change = current - prev
+        change_pct = (change / prev * 100) if prev else 0.0
+
+        is_us = ticker_code.isalpha() and len(ticker_code) <= 5 and not ticker_code.startswith("^")
+        if is_us:
+            price = f"${current:,.2f}"
+            delta = f"{change:+.2f}"
+        else:
+            price = f"{current:,.0f}원"
+            delta = f"{change:+,.0f}원"
+
+        text = (
+            f"[{company_name} ({ticker_code})]\\n"
+            f"현재가: {price}\n"
+            f"전일 대비: {delta} ({change_pct:+.2f}%)"
         )
+        return text, None
+    except Exception as exc:
+        return None, f"yfinance quote error: {exc}"
+
+
+def run_technical_analysis(query: str) -> tuple[Optional[str], Optional[str]]:
+    yf, import_error = _import_yfinance()
+    if import_error:
+        return None, import_error
+
+    ticker_code, company_name = _resolve_ticker(query)
+    if not ticker_code:
+        return None, _u("\\uc885\\ubaa9\\uba85\\uc744 \\uc778\\uc2dd\\ud558\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4. \\uc608: '\\uc0bc\\uc131\\uc804\\uc790 \\uc8fc\\uac00 \\uc608\\uce21\\ud574\\uc918'")
 
     try:
         df = yf.Ticker(ticker_code).history(period="3mo")
         if df.empty:
-            return None, f"'{company_name}' 가격 데이터를 가져오지 못했습니다. 티커({ticker_code})를 확인해 주세요."
+            return None, _u("\\uac00\\uaca9 \\ub370\\uc774\\ud130\\ub97c \\uac00\\uc838\\uc624\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4.")
 
         close = df["Close"]
-        is_usd = ticker_code in {"AAPL", "NVDA", "TSLA", "MSFT", "GOOGL", "META"}
-        currency = "USD" if is_usd else "원"
-        price_fmt = lambda p: f"${p:,.2f}" if is_usd else f"{p:,.0f}원"  # noqa: E731
-
-        current = close.iloc[-1]
-        prev = close.iloc[-2]
+        current = float(close.iloc[-1])
+        prev = float(close.iloc[-2])
         change = current - prev
-        change_pct = (change / prev) * 100
+        change_pct = (change / prev) * 100 if prev else 0.0
 
-        # ── 기술 지표 계산 ────────────────────────────────────────────────────
-        rsi_val = _calc_rsi(close).iloc[-1]
-        macd_line, signal_line, histogram = _calc_macd(close)
-        macd_v, sig_v, hist_v = macd_line.iloc[-1], signal_line.iloc[-1], histogram.iloc[-1]
-        upper_bb, mid_bb, lower_bb = _calc_bollinger(close)
-        upper_v, mid_v, lower_v = upper_bb.iloc[-1], mid_bb.iloc[-1], lower_bb.iloc[-1]
+        rsi_val = float(_calc_rsi(close).iloc[-1])
+        macd_line, signal_line, hist = _calc_macd(close)
+        macd_v = float(macd_line.iloc[-1])
+        sig_v = float(signal_line.iloc[-1])
+        hist_v = float(hist.iloc[-1])
+        upper, mid, lower = _calc_bollinger(close)
 
-        ma5 = close.rolling(5).mean().iloc[-1]
-        ma20 = close.rolling(20).mean().iloc[-1]
-        ma60 = close.rolling(60).mean().iloc[-1] if len(close) >= 60 else None
-
-        avg_vol = df["Volume"].rolling(20).mean().iloc[-1]
-        today_vol = df["Volume"].iloc[-1]
-        vol_ratio = today_vol / avg_vol if avg_vol > 0 else 0
-
-        # ── RSI 해석 ─────────────────────────────────────────────────────────
-        if rsi_val > 70:
-            rsi_interp = f"⚠️  과매수 구간 ({rsi_val:.1f}) — 단기 차익실현 매물 가능성"
-        elif rsi_val < 30:
-            rsi_interp = f"⚠️  과매도 구간 ({rsi_val:.1f}) — 기술적 반등 가능성"
-        else:
-            rsi_interp = f"중립 ({rsi_val:.1f}) — 추세 지속 가능성"
-
-        # ── MACD 해석 ─────────────────────────────────────────────────────────
-        if macd_v > sig_v and hist_v > 0:
-            macd_interp = "골든크로스 유지 (상승 모멘텀)"
-        elif macd_v < sig_v and hist_v < 0:
-            macd_interp = "데드크로스 유지 (하락 모멘텀)"
-        elif macd_v > sig_v and hist_v <= 0:
-            macd_interp = "골든크로스 진입 직전 (상승 전환 신호)"
-        else:
-            macd_interp = "데드크로스 진입 직전 (하락 전환 신호)"
-
-        # ── 볼린저밴드 해석 ───────────────────────────────────────────────────
-        if current > upper_v:
-            bb_interp = "상단 밴드 돌파 — 강한 상승세, 과열 주의"
-        elif current < lower_v:
-            bb_interp = "하단 밴드 이탈 — 강한 하락세, 반등 가능성"
-        else:
-            bb_pos_pct = (current - lower_v) / (upper_v - lower_v) * 100 if (upper_v - lower_v) > 0 else 50
-            bb_interp = f"밴드 내 위치 (하단 대비 {bb_pos_pct:.0f}% 지점)"
-
-        # ── MA 해석 (정배열/역배열) ───────────────────────────────────────────
-        if ma5 > ma20 and (ma60 is None or ma20 > ma60):
-            ma_interp = "정배열 (단기 > 중기 > 장기) — 상승 추세"
-        elif ma5 < ma20 and (ma60 is None or ma20 < ma60):
-            ma_interp = "역배열 (단기 < 중기 < 장기) — 하락 추세"
-        else:
-            ma_interp = "이동평균 혼조 — 추세 전환 구간 가능성"
-
-        # ── 최종 텍스트 조립 ──────────────────────────────────────────────────
         lines = [
-            f"[{company_name} ({ticker_code}) 기술적 분석 데이터]",
-            f"📌 현재가: {price_fmt(current)}  ({change:+.2f} / {change_pct:+.2f}%)",
-            "",
-            f"📊 이동평균 → {ma_interp}",
-            f"  MA5={price_fmt(ma5)}  /  MA20={price_fmt(ma20)}"
-            + (f"  /  MA60={price_fmt(ma60)}" if ma60 else ""),
-            "",
-            f"📊 RSI(14): {rsi_interp}",
-            "",
-            f"📊 MACD(12,26,9): {macd_interp}",
-            f"  MACD={macd_v:+.2f}  /  시그널={sig_v:+.2f}  /  히스토그램={hist_v:+.2f}",
-            "",
-            f"📊 볼린저밴드(20, 2σ): {bb_interp}",
-            f"  상단={price_fmt(upper_v)}  /  중간={price_fmt(mid_v)}  /  하단={price_fmt(lower_v)}",
-            "",
-            f"📊 거래량: 오늘 {today_vol:,.0f}주  (20일 평균 대비 {vol_ratio:.1f}배)",
-            "",
-            "※ 위 데이터는 기술적 지표이며 투자 조언이 아닙니다.",
+            f"[{company_name} ({ticker_code}) technical]",
+            f"close={current:.2f}, change={change:+.2f} ({change_pct:+.2f}%)",
+            f"RSI14={rsi_val:.2f}",
+            f"MACD={macd_v:.4f}, SIGNAL={sig_v:.4f}, HIST={hist_v:.4f}",
+            f"BB_UPPER={float(upper.iloc[-1]):.2f}, BB_MID={float(mid.iloc[-1]):.2f}, BB_LOWER={float(lower.iloc[-1]):.2f}",
+            "Use only the values above. No investment advice.",
         ]
-        return "\n".join(lines), None
-
+        return "\\n".join(lines), None
     except Exception as exc:
-        return None, f"기술적 분석 처리 중 오류 발생: {exc}"
+        return None, f"yfinance analysis error: {exc}"

@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions
 
 set "SCRIPT_DIR=%~dp0"
@@ -52,6 +52,15 @@ if errorlevel 1 (
     if errorlevel 1 goto :fail_primp
 ) else (
     echo primp already installed.
+)
+
+python -c "import yfinance" >nul 2>nul
+if errorlevel 1 (
+    echo yfinance not found. Installing...
+    pip install yfinance
+    if errorlevel 1 goto :fail_yfinance
+) else (
+    echo yfinance already installed.
 )
 
 echo.
@@ -120,5 +129,12 @@ exit /b 1
 
 :fail_zip
 echo *** ZIP creation failed ***
+popd
+exit /b 1
+
+
+
+:fail_yfinance
+echo *** Failed to install yfinance ***
 popd
 exit /b 1

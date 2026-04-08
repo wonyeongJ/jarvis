@@ -36,6 +36,8 @@ hiddenimports = [
     "ddgs.engines",
     "primp",
     "requests",
+    "yfinance",
+    "pandas",
     "email",
     "email.mime",
     "email.mime.text",
@@ -106,3 +108,5 @@ coll = COLLECT(
     upx_exclude=[],
     name="jarvis",
 )
+
+

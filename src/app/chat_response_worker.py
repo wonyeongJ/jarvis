@@ -20,7 +20,12 @@ from services.search_facade import (
     should_use_web_search,
     web_search_with_status,
 )
-from services.stock_analysis_service import is_stock_analysis_query, run_technical_analysis
+from services.stock_analysis_service import (
+    is_stock_analysis_query,
+    is_stock_price_query,
+    run_stock_quote,
+    run_technical_analysis,
+)
 
 
 MAX_HISTORY_MESSAGES = 6
@@ -72,6 +77,17 @@ class ChatResponseWorker(QThread):
         document_context = None
         search_result = None
 
+        # 주가 조회 요청은 yfinance 값으로 직접 응답 (LLM 재해석 방지)
+        if is_stock_price_query(last_user_message) and not is_stock_analysis_query(last_user_message):
+            self.search_status.emit("📈 주가 데이터를 조회하는 중입니다...")
+            quote_text, quote_error = run_stock_quote(last_user_message)
+            if quote_text:
+                self.finished.emit(quote_text)
+                return
+            if quote_error:
+                self.finished.emit(quote_error)
+                return
+
         # ★ 기술적 분석 요청은 request_type에 무관하게 최우선으로 처리
         if is_stock_analysis_query(last_user_message):
             self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
@@ -80,7 +96,10 @@ class ChatResponseWorker(QThread):
                 search_result = analysis_text
                 request_type = "stock_analysis"
             elif analysis_error:
-                # 종목 미인식 등 → 조용히 웹 검색으로 fallback
+                if self._is_stock_dependency_error(analysis_error):
+                    self.finished.emit(analysis_error)
+                    return
+                # 종목 미인식 등 → 웹 검색으로 fallback
                 search_result = self._run_web_search(last_user_message)
                 if search_result is None:
                     return
@@ -102,7 +121,7 @@ class ChatResponseWorker(QThread):
                 return
             items = search_local_files(keyword)
             if items == "__TIMEOUT__":
-                self.pc_failed.emit("Everything ?? ??? ???? ????. ?? ? ?? ??? ???.")
+                self.pc_failed.emit("Everything 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
                 return
             if items is None:
                 self.pc_failed.emit("로컬 파일 검색 서비스에 연결하지 못했습니다.")
@@ -131,6 +150,9 @@ class ChatResponseWorker(QThread):
                     search_result = analysis_text
                     request_type = "stock_analysis"
                 elif analysis_error:
+                    if self._is_stock_dependency_error(analysis_error):
+                        self.finished.emit(analysis_error)
+                        return
                     # 종목 미인식 또는 데이터 오류 → 일반 웹 검색으로 fallback
                     self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
                     search_result = self._run_web_search(last_user_message)
@@ -172,6 +194,9 @@ class ChatResponseWorker(QThread):
                     search_result = analysis_text
                     request_type = "stock_analysis"
                 elif analysis_error:
+                    if self._is_stock_dependency_error(analysis_error):
+                        self.finished.emit(analysis_error)
+                        return
                     self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
                     search_result = self._run_web_search(last_user_message)
                     if search_result is None:
@@ -195,6 +220,7 @@ class ChatResponseWorker(QThread):
 
         try:
             response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120, stream=True)
+            response.raise_for_status()
             full_response = ""
             for line in response.iter_lines():
                 if not line:
@@ -206,16 +232,24 @@ class ChatResponseWorker(QThread):
                 if chunk.get("done"):
                     break
 
-            self.finished.emit(full_response)
+            if full_response.strip():
+                self.finished.emit(full_response)
+            else:
+                self.finished.emit("응답을 생성하지 못했습니다. 다시 한 번 요청해 주세요.")
         except Exception as error:
             self.finished.emit(f"Jarvis 오류: Ollama 연결에 실패했습니다.\n\n{error}")
 
+    def _is_stock_dependency_error(self, error_message: str) -> bool:
+        """yfinance 의존성 관련 오류 여부를 판단합니다."""
+        lowered = (error_message or "").lower()
+        return "yfinance" in lowered
+
     def _is_weather_query(self, query):
-        """?? ?? ??? ??? ?????."""
+        """날씨 질문 여부를 간단히 판단합니다."""
         return any(keyword in query for keyword in ["날씨", "기온", "온도"])
 
     def _build_direct_weather_answer(self, query, search_result):
-        """??? ?? ?? ??? LLM ? ??? ?? ?? ?????."""
+        """네이버 현재 날씨 결과는 LLM을 거치지 않고 바로 답변합니다."""
         if not self._is_weather_query(query):
             return None
         if not search_result or not search_result.startswith("[NAVER_WEATHER]"):
@@ -274,7 +308,7 @@ class ChatResponseWorker(QThread):
         return " ".join(parts)
 
     def _run_web_search(self, query):
-        """? ??? ???? ?? ? ????? ??? ?????."""
+        """웹 검색을 수행하고 실패 시 사용자에게 원인을 안내합니다."""
         search_status = web_search_with_status(query)
         if search_status.get("content"):
             return search_status["content"]
@@ -472,3 +506,5 @@ class ChatResponseWorker(QThread):
             )
 
         return messages
+
+
