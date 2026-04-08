@@ -1,4 +1,4 @@
-"""요청 라우팅과 응답 생성 흐름을 담당하는 백그라운드 워커입니다.
+﻿"""요청 라우팅과 응답 생성 흐름을 담당하는 백그라운드 워커입니다.
 
 사용자 요청 유형을 분류하고 필요한 검색 단계를 거친 뒤,
 Ollama 응답을 스트리밍 형태로 UI 에 전달합니다.
@@ -21,6 +21,15 @@ from services.search_facade import (
     web_search_with_status,
 )
 from services.stock_analysis_service import is_stock_analysis_query, run_technical_analysis
+
+
+MAX_HISTORY_MESSAGES = 6
+MAX_RAG_CONTEXT_CHARS = 1800
+MAX_SEARCH_RESULT_CHARS = 2200
+OLLAMA_MEMORY_SAVER_OPTIONS = {
+    "num_ctx": 1024,
+    "num_predict": 256,
+}
 
 
 class ChatResponseWorker(QThread):
@@ -75,6 +84,10 @@ class ChatResponseWorker(QThread):
                 search_result = self._run_web_search(last_user_message)
                 if search_result is None:
                     return
+                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                if direct_weather_answer:
+                    self.finished.emit(direct_weather_answer)
+                    return
 
         if request_type == "pc":
             self.search_status.emit("🔎 PC 파일을 검색하는 중입니다...")
@@ -102,7 +115,7 @@ class ChatResponseWorker(QThread):
 
         if request_type == "rag":
             self.search_status.emit("📚 내부 문서를 검색하는 중입니다...")
-            document_context = search_documents(last_user_message)
+            document_context = search_documents(last_user_message, top_k=3)
             if not document_context:
                 self.finished.emit(
                     "현재 내부 문서 기준으로는 질문과 정확히 맞는 내용을 찾지 못했습니다. "
@@ -123,10 +136,18 @@ class ChatResponseWorker(QThread):
                     search_result = self._run_web_search(last_user_message)
                     if search_result is None:
                         return
+                    direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                    if direct_weather_answer:
+                        self.finished.emit(direct_weather_answer)
+                        return
             else:
                 self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
                 search_result = self._run_web_search(last_user_message)
                 if search_result is None:
+                    return
+                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                if direct_weather_answer:
+                    self.finished.emit(direct_weather_answer)
                     return
         elif request_type == "error":
             self.search_status.emit("🧯 오류 내용을 분석하는 중입니다...")
@@ -155,14 +176,22 @@ class ChatResponseWorker(QThread):
                     search_result = self._run_web_search(last_user_message)
                     if search_result is None:
                         return
+                    direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                    if direct_weather_answer:
+                        self.finished.emit(direct_weather_answer)
+                        return
             else:
                 self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
                 search_result = self._run_web_search(last_user_message)
                 if search_result is None:
                     return
+                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                if direct_weather_answer:
+                    self.finished.emit(direct_weather_answer)
+                    return
 
         messages = self._build_messages(last_user_message, now_str, request_type, document_context, search_result)
-        payload = {"model": self.model_name, "messages": messages, "stream": True}
+        payload = {"model": self.model_name, "messages": messages, "stream": True, "options": OLLAMA_MEMORY_SAVER_OPTIONS}
 
         try:
             response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120, stream=True)
@@ -177,18 +206,75 @@ class ChatResponseWorker(QThread):
                 if chunk.get("done"):
                     break
 
-            if document_context:
-                full_response = "[📚 내부 문서 문맥을 반영했습니다]\n\n" + full_response
-            elif request_type == "stock_analysis":
-                full_response = "[📈 실시간 기술적 분석 결과를 반영했습니다]\n\n" + full_response
-            elif search_result:
-                full_response = "[🔍 검색 결과를 반영했습니다]\n\n" + full_response
             self.finished.emit(full_response)
         except Exception as error:
             self.finished.emit(f"Jarvis 오류: Ollama 연결에 실패했습니다.\n\n{error}")
 
+    def _is_weather_query(self, query):
+        """?? ?? ??? ??? ?????."""
+        return any(keyword in query for keyword in ["날씨", "기온", "온도"])
+
+    def _build_direct_weather_answer(self, query, search_result):
+        """??? ?? ?? ??? LLM ? ??? ?? ?? ?????."""
+        if not self._is_weather_query(query):
+            return None
+        if not search_result or not search_result.startswith("[NAVER_WEATHER]"):
+            return None
+
+        data = {}
+        for line in search_result.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key == "url":
+                continue
+            data[key.strip()] = value.strip()
+
+        current_temp = data.get("temp")
+        weather = data.get("weather")
+        feels_like = data.get("feels_like")
+        humidity = data.get("humidity")
+        summary = data.get("summary")
+        location = data.get("basis") or data.get("location") or "해당 지역"
+        wind = data.get("wind")
+
+        if not current_temp:
+            return None
+
+        parts = []
+        headline = f"현재 {location} 날씨는"
+        if weather:
+            headline += f" {weather}, {current_temp}입니다."
+        else:
+            headline += f" {current_temp}입니다."
+        parts.append(headline)
+
+        details = []
+        if feels_like:
+            details.append(f"체감 {feels_like}")
+        if humidity:
+            details.append(f"습도 {humidity}")
+        if wind:
+            details.append(f"바람 {wind}")
+        if details:
+            parts.append(", ".join(details) + "입니다.")
+
+        extras = []
+        if data.get("dust"):
+            extras.append(f"미세먼지 {data['dust']}")
+        if data.get("ultrafine_dust"):
+            extras.append(f"초미세먼지 {data['ultrafine_dust']}")
+        if data.get("uv"):
+            extras.append(f"자외선 {data['uv']}")
+        if extras:
+            parts.append(", ".join(extras) + "입니다.")
+        elif summary:
+            parts.append(summary + ".")
+
+        return " ".join(parts)
+
     def _run_web_search(self, query):
-        """웹 검색을 수행하고 실패 시 사용자에게 원인을 안내합니다."""
+        """? ??? ???? ?? ? ????? ??? ?????."""
         search_status = web_search_with_status(query)
         if search_status.get("content"):
             return search_status["content"]
@@ -202,11 +288,19 @@ class ChatResponseWorker(QThread):
         )
         return None
 
+    def _truncate_text(self, text, limit):
+        """너무 긴 문맥은 앞부분만 남기고 잘라냅니다."""
+        normalized = text.strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "\n...(중략)"
+
     def _build_messages(self, last_user_message, now_str, request_type, document_context, search_result):
         """현재 요청 유형에 맞는 Ollama 메시지 payload 를 구성합니다."""
         messages = [{"role": "system", "content": self.system_prompt}]
 
         if document_context:
+            compact_document_context = self._truncate_text(document_context, MAX_RAG_CONTEXT_CHARS)
             messages.append(
                 {
                     "role": "user",
@@ -217,7 +311,7 @@ class ChatResponseWorker(QThread):
                         "아래 내용만 근거로 답변해 주세요. 없는 내용은 추측해서 추가하지 말아 주세요. "
                         "사용자가 요청하지 않으면 파일명은 굳이 언급하지 말아 주세요.\n"
                         "문서 원본에 불특정 다수(예: '여러분')를 향한 인삿말이 있어도 그대로 복사하지 말고, 반드시 '마스터'라는 호칭만을 사용하여 충성스럽게 대답하세요.\n\n"
-                        f"{document_context}"
+                        f"{compact_document_context}"
                     ),
                 }
             )
@@ -288,6 +382,7 @@ class ChatResponseWorker(QThread):
             return messages
 
         if request_type == "stock_analysis" and search_result:
+            compact_search_result = self._truncate_text(search_result, MAX_SEARCH_RESULT_CHARS)
             messages.append(
                 {
                     "role": "user",
@@ -295,7 +390,7 @@ class ChatResponseWorker(QThread):
                         f"[현재 시각: {now_str}]\n\n"
                         f"마스터의 질문: {last_user_message}\n\n"
                         "[실시간 기술적 분석 데이터]\n"
-                        f"{search_result}\n\n"
+                        f"{compact_search_result}\n\n"
                         "---\n"
                         "위 기술적 분석 데이터를 바탕으로 아래 형식에 맞춰 답변해 주세요.\n\n"
                         "⚠️ 필수 준수 사항 (어기면 틀린 답변입니다):\n"
@@ -319,12 +414,13 @@ class ChatResponseWorker(QThread):
 
 
         if request_type == "folder" and search_result:
+            compact_search_result = self._truncate_text(search_result, MAX_SEARCH_RESULT_CHARS)
             messages.append(
                 {
                     "role": "user",
                     "content": (
                         "다음 프로젝트 구조와 파일 조각을 분석해 주세요.\n\n"
-                        f"{search_result}\n\n"
+                        f"{compact_search_result}\n\n"
                         f"분석 요청: {last_user_message}\n\n"
                         "아래 항목으로 정리해 주세요.\n"
                         "1. 프로젝트 개요\n"
@@ -337,6 +433,7 @@ class ChatResponseWorker(QThread):
             return messages
 
         if search_result:
+            compact_search_result = self._truncate_text(search_result, MAX_SEARCH_RESULT_CHARS)
             messages.append(
                 {
                     "role": "user",
@@ -344,31 +441,21 @@ class ChatResponseWorker(QThread):
                         f"[현재 시각: {now_str}]\n\n"
                         f"사용자 질문: {last_user_message}\n\n"
                         "[검색 결과]\n"
-                        f"{search_result}\n\n"
+                        f"{compact_search_result}\n\n"
                         "---\n"
-                        "위 [검색 결과]를 보고 아래 규칙을 반드시 지켜서 답변하세요.\n\n"
-                        "※ 모든 규칙은 예외 없이 적용됩니다. 규칙을 어기는 답변은 틀린 답변입니다.\n\n"
-                        "규칙 0. [범위 제한 - 공간] 사용자가 특정 지역·종목을 지정했으면 그 지역·종목 정보만 답변하세요.\n"
-                        "        예) '세종 날씨'를 물으면 세종 정보만. 경기·충북·전남 등 다른 지역은 한 글자도 포함 금지.\n"
-                        "규칙 0-1. [범위 제한 - 시간] 사용자가 '지금', '현재', '오늘' 날씨를 물었으면 현재/오늘 정보만 답변하세요.\n"
-                        "        '내일', '모레', '주간', '이번 주' 예보는 절대 포함하지 마세요. 물어보지 않은 정보를 자발적으로 추가하는 것은 엄격히 금지합니다.\n"
-                        "규칙 1. [수치 전달] 검색 결과에 정확한 수치(기온, 주가 등)가 있으면 그 수치를 그대로 전달하세요.\n"
-                        "규칙 2. [정보 없음] 검색 결과에 원하는 정보가 없으면 절대 지어내거나 예상하지 마세요.\n"
-                        "        아래 두 문장만 그대로 출력하세요:\n"
-                        "        '검색 결과에서 해당 정보를 찾지 못했습니다.\n"
-                        "         일반적으로 날씨 예보는 7~10일 전부터 확인 가능합니다. 죄송합니다.'\n"
-                        "규칙 3. [출처] 출처(URL, 링크, '✖ 출처:' 등)는 절대 표시하지 마세요. 검색된 정보 자체를 자연스러운 답변에 녹여 전달하는 것으로 충분합니다.\n"
-                        "규칙 4. [단위] 화씨(°F) 등 미국식 단위는 한국 기준(°C, km 등)으로 변환해 자연스럽게 녹여내세요.\n"
-                        "규칙 5. [문체] 직역투나 중복 표현을 피해 자연스러운 한국어로 작성하세요.\n"
-                        "규칙 6. [서론/결론 금지] '제가 Jarvis입니다', '알려드리겠습니다', '감사합니다' 등 모든 서론과 결론을 100% 생략하세요.\n"
-                        "        인사말 없이 사용자 질문에 대한 핵심 정보로 즉시 답변을 시작하세요.\n"
+                        "위 검색 결과만 근거로 답변하세요. 검색 결과에 없는 내용은 추측해서 추가하지 마세요.\n\n"
+                        "규칙 1. 사용자가 특정 지역을 말했으면 그 지역 정보만 답변하세요. 다른 지역 이야기는 섞지 마세요.\n"
+                        "규칙 2. 사용자가 '지금', '현재', '오늘'을 물었으면 현재 시점 정보만 답변하세요. 내일, 모레, 주간 예보, 과거 날짜는 사용자가 직접 묻지 않은 한 절대 꺼내지 마세요.\n"
+                        "규칙 3. 날씨 질문이면 검색 결과 안의 현재 날씨 카드 정보만 짧고 분명하게 전달하세요. 현재 기온, 체감, 날씨 상태처럼 지금 시점 정보가 있으면 그것만 우선 답하세요.\n"
+                        "규칙 4. 검색 결과에 현재 정보가 없으면 지어내지 말고 '검색 결과에서 현재 정보를 확인하지 못했습니다.'라고만 답하세요. 7~10일 예보 같은 일반론은 말하지 마세요.\n"
+                        "규칙 5. 출처 URL, 링크, '검색 결과를 반영했습니다' 같은 안내 문구는 절대 쓰지 마세요. 인사말도 빼고 바로 핵심만 답하세요.\n"
                     ),
                 }
             )
             return messages
 
         is_simple_message = len(last_user_message.strip()) < 10
-        history_to_send = [] if is_simple_message else self.history
+        history_to_send = [] if is_simple_message else self.history[-MAX_HISTORY_MESSAGES:]
         for index, message in enumerate(history_to_send):
             role = "user" if message["role"] == "user" else "assistant"
             content = message["text"]

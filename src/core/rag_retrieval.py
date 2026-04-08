@@ -27,6 +27,7 @@ GENERIC_QUERY_TOKENS = {
     "관련",
 }
 
+_INDEXED_FILENAMES_CACHE = {}
 
 def normalize_match_text(text: str) -> str:
     """문서명과 질의를 비교하기 쉬운 형태로 정규화합니다."""
@@ -48,8 +49,21 @@ def extract_query_keywords(query: str):
 
 def list_indexed_filenames(collection):
     """벡터 컬렉션에 적재된 파일명 목록을 반환합니다."""
+    cache_key = id(collection)
+    cached = _INDEXED_FILENAMES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     results = collection.get(include=["metadatas"])
-    return sorted({metadata.get("filename", "") for metadata in results.get("metadatas", []) if metadata.get("filename")})
+    filenames = sorted(
+        {
+            metadata.get("filename", "")
+            for metadata in results.get("metadatas", [])
+            if metadata.get("filename")
+        }
+    )
+    _INDEXED_FILENAMES_CACHE[cache_key] = filenames
+    return filenames
 
 
 def infer_candidate_filenames(query: str, filenames):

@@ -1,8 +1,9 @@
-"""간단한 웹 검색과 웹 검색 필요 여부 판단을 담당하는 서비스 모듈입니다."""
+﻿"""간단한 웹 검색과 웹 검색 필요 여부 판단을 담당하는 서비스 모듈입니다."""
 
 from __future__ import annotations
 
 import datetime
+import html as html_lib
 import re
 import requests
 
@@ -15,7 +16,7 @@ from core.settings import get_env
 # ---------------------------------------------------------------------------
 _QUERY_VALIDATORS = [
     # 날씨/기온 질문 → 숫자+°C 또는 숫자+도 가 있어야 유효
-    (["날씨", "기온", "온도"], r"\d+(\.\d+)?\s*(°C|℃|도)"),
+    (["날씨", "기온", "온도"], r"\d+(\.\d+)?\s*(°C|℃|도|°)"),
     # 주가/환율 질문 → 숫자+원 또는 콤마 포함 숫자 가 있어야 유효
     (["주가", "주식", "환율", "시세"], r"\d{1,3}(,\d{3})+|\d+(\.\d+)?\s*원"),
 ]
@@ -107,21 +108,107 @@ def search_duckduckgo(query, max_results=3):
         return None, f"DuckDuckGo 검색 실패: {error}"
 
 
-def _scrape_naver_weather_widget(soup):
-    """네이버 모바일 날씨 위젯을 CSS 선택자로 직접 집중 추출합니다.
+def _clean_html_text(fragment: str) -> str:
+    """Strip HTML tags and normalize whitespace."""
+    text = re.sub(r"<[^>]+>", " ", fragment)
+    text = html_lib.unescape(text)
+    return " ".join(text.split())
 
-    일반 텍스트 추출보다 훨씬 정확하게 날씨 카드 영역만 골라냅니다.
-    """
-    # 네이버 모바일 날씨 카드에서 주로 사용되는 클래스/섹션 후보 (우선순위 순)
+
+def _extract_naver_weather_from_html(html: str) -> dict[str, str] | None:
+    """Extract current-weather fields from Naver mobile weather card HTML."""
+    if "weather_info" not in html or "temperature_text" not in html:
+        return None
+
+    data: dict[str, str] = {}
+
+    location_match = re.search(r'<span class="select_txt">(.*?)</span>', html)
+    basis_match = re.search(r'<span class="select_txt_sub">(.*?)</span>', html)
+    if location_match:
+        data["location"] = _clean_html_text(location_match.group(1))
+    if basis_match:
+        data["basis"] = _clean_html_text(basis_match.group(1))
+
+    weather_info_match = re.search(r'<div class="weather_info">(.*?)<div class="report_card_wrap">', html, re.DOTALL)
+    if not weather_info_match:
+        return None
+
+    weather_info_html = weather_info_match.group(1)
+    weather_info_text = _clean_html_text(weather_info_html)
+
+    temp_match = re.search(r'현재 온도\s*([0-9][0-9.]*)\s*°', weather_info_text)
+    if not temp_match:
+        return None
+    data["temp"] = temp_match.group(1) + "°"
+
+    weather_match = re.search(r'<p class="summary">.*?<span class="weather">(.*?)</span>', weather_info_html, re.DOTALL)
+    if weather_match:
+        data["weather"] = _clean_html_text(weather_match.group(1))
+
+    summary_match = re.search(r'(어제보다.*?)(?:체감|습도|[남북동서]풍)', weather_info_text)
+    if summary_match:
+        data["summary"] = summary_match.group(1).strip()
+
+    feels_like_match = re.search(r'체감\s*([0-9][0-9.]*°)', weather_info_text)
+    humidity_match = re.search(r'습도\s*([0-9]+%)', weather_info_text)
+    wind_match = re.search(r'([남북동서]풍\s*[0-9][0-9.]*m/s)', weather_info_text)
+    if feels_like_match:
+        data["feels_like"] = feels_like_match.group(1)
+    if humidity_match:
+        data["humidity"] = humidity_match.group(1)
+    if wind_match:
+        data["wind"] = wind_match.group(1)
+
+    report_card_match = re.search(r'<div class="report_card_wrap">(.*?)</ul>', html, re.DOTALL)
+    if report_card_match:
+        card_text = _clean_html_text(report_card_match.group(1))
+        dust_match = re.search(r'미세먼지\s*([^\s]+)', card_text)
+        ultrafine_match = re.search(r'초미세먼지\s*([^\s]+)', card_text)
+        uv_match = re.search(r'자외선\s*([^\s]+)', card_text)
+        if dust_match:
+            data["dust"] = dust_match.group(1)
+        if ultrafine_match:
+            data["ultrafine_dust"] = ultrafine_match.group(1)
+        if uv_match:
+            data["uv"] = uv_match.group(1)
+
+    return data
+
+
+def _format_naver_weather_result(data: dict[str, str], url: str) -> str:
+    """Serialize structured weather data for the chat worker."""
+    ordered_keys = [
+        "location",
+        "basis",
+        "temp",
+        "weather",
+        "summary",
+        "feels_like",
+        "humidity",
+        "wind",
+        "dust",
+        "ultrafine_dust",
+        "uv",
+    ]
+    lines = ["[NAVER_WEATHER]", f"url={url}"]
+    for key in ordered_keys:
+        value = data.get(key)
+        if value:
+            lines.append(f"{key}={value}")
+    return "\n".join(lines)
+
+
+def _scrape_naver_weather_widget(soup):
+    """BeautifulSoup-based fallback extractor."""
     selector_groups = [
-        "div[class*='weather']",
+        "section.cs_weather_new",
         "section[class*='weather']",
-        "div[class*='Weather']",
+        "div.weather_info",
+        "div[class*='weather']",
         "div[class*='temperature']",
         "div[class*='today']",
         "div[class*='forecast']",
-        "div[class*='climate']",
-        "div[class*='finedust']",  # 미세먼지
+        "div[class*='finedust']",
     ]
 
     seen = set()
@@ -135,141 +222,179 @@ def _scrape_naver_weather_widget(soup):
                 texts.append(t)
 
     if texts:
-        combined = " | ".join(texts)
-        return combined[:2500]
+        return " | ".join(texts)[:2500]
     return None
 
 
-def _build_weather_query(query):
-    """날씨 질문에서 지역명을 추출해 네이버 검색에 최적화된 쿼리를 반환합니다.
-
-    예) '세종 날씨 알려줘' → '세종 현재 날씨 기온'
-    """
-    # 날씨 관련 조사/동사/시제 표현 제거 후 지역명만 남김
-    clean = re.sub(
-        r"알려줘|가르쳐|어때|어떠|어떤지|어떻게|날씨|기온|온도|현재|지금|오늘|내일|요즘|이번주|주간",
-        "",
+def _extract_weather_region(query: str) -> str:
+    """Extract a location phrase from a Korean weather question."""
+    region = re.sub(
+        r"\uae30\uc900\uc73c\ub85c|\uae30\uc900|\uc54c\ub824\uc918|\uac00\ub974\uccd0\uc918|\uac00\ub974\uccd0|"
+        r"\uc5b4\ub54c|\uc5b4\ub5a0|\uc5b4\ub5a4\uc9c0|\uc5b4\ub5bb\uac8c|\ub0a0\uc528|\uae30\uc628|\uc628\ub3c4|"
+        r"\ud604\uc7ac|\uc9c0\uae08|\uc624\ub298|\ub0b4\uc77c|\uc694\uc998|\uc774\ubc88\uc8fc|\uc8fc\uac04|"
+        r"\uc880|\ud55c\ubc88|\uc880\s*\uc54c\ub824\uc918",
+        " ",
         query,
-    ).strip()
-    region = clean if clean else ""
+    )
+    region = re.sub(r"\s+", " ", region).strip(" ,")
+    return region
+
+
+def _build_weather_queries(query):
+    """Build prioritized weather queries for Naver search."""
+    region = _extract_weather_region(query)
+    candidates = []
+
     if region:
-        return f"{region} 현재 날씨 기온"
-    return "오늘 날씨 현재 기온"
+        candidates.extend(
+            [
+                f"{region} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
+                f"{region} \ub0a0\uc528",
+                f"{region} \ud604\uc7ac \ub0a0\uc528",
+            ]
+        )
+
+        if region.startswith("\uc138\uc885 "):
+            expanded = region.replace("\uc138\uc885 ", "\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc ", 1)
+            candidates.extend(
+                [
+                    f"{expanded} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
+                    f"{expanded} \ub0a0\uc528",
+                    f"{expanded} \ud604\uc7ac \ub0a0\uc528",
+                ]
+            )
+
+        if "\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc" in region and "\uc138\uc885 " not in region:
+            shortened = region.replace("\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc", "\uc138\uc885", 1).strip()
+            if shortened:
+                candidates.extend(
+                    [
+                        f"{shortened} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
+                        f"{shortened} \ub0a0\uc528",
+                    ]
+                )
+
+    candidates.append("\uc624\ub298 \ub0a0\uc528 \ud604\uc7ac \uae30\uc628")
+
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        normalized = re.sub(r"\s+", " ", candidate).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+
+    return deduped
 
 
 def search_naver_direct(query):
-    """네이버 모바일 검색 결과를 직접 스크래핑하여 실시간 날씨, 주가 등 위젯 텍스트를 추출합니다.
-
-    날씨 쿼리의 경우:
-    1) _build_weather_query()로 네이버 최적화 쿼리를 생성합니다.
-    2) _scrape_naver_weather_widget()으로 날씨 위젯 영역을 직접 집중 추출합니다.
-    3) 위젯 추출 실패 시 일반 텍스트(3000자)로 확대 탐색합니다.
-    """
-    is_weather_query = any(k in query for k in ["날씨", "기온", "온도"])
+    """Scrape Naver mobile search results for weather or stock widgets."""
+    is_weather_query = any(k in query for k in ["\ub0a0\uc528", "\uae30\uc628", "\uc628\ub3c4"])
 
     try:
-        import urllib.request
         import urllib.parse
-        from bs4 import BeautifulSoup
+        import urllib.request
 
-        # ★ 날씨 쿼리일 때 Naver에 최적화된 쿼리 사용 (지역 + 날씨 + 기온)
-        naver_query = _build_weather_query(query) if is_weather_query else query
+        candidate_queries = _build_weather_queries(query) if is_weather_query else [query]
+        last_error = None
 
-        url = f"https://m.search.naver.com/search.naver?query={urllib.parse.quote(naver_query)}"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                )
-            },
-        )
-        html = urllib.request.urlopen(req, timeout=5).read().decode("utf-8", errors="ignore")
-        soup = BeautifulSoup(html, "lxml")
+        for naver_query in candidate_queries:
+            url = f"https://m.search.naver.com/search.naver?query={urllib.parse.quote(naver_query)}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                },
+            )
+            html = urllib.request.urlopen(req, timeout=5).read().decode("utf-8", errors="ignore")
 
-        # 불필요한 태그 제거
-        for tag in soup(["script", "style", "header", "footer", "nav", "noscript", "svg", "button", "img"]):
-            tag.decompose()
+            if is_weather_query:
+                weather_data = _extract_naver_weather_from_html(html)
+                if weather_data:
+                    return _format_naver_weather_result(weather_data, url), None
 
-        # ★ 날씨 쿼리: CSS 선택자로 위젯 영역만 집중 추출
-        if is_weather_query:
-            widget_text = _scrape_naver_weather_widget(soup)
-            if widget_text and _is_scraping_result_valid(query, widget_text):
-                return f"[네이버 날씨 위젯 직접 추출]\n출처 URL: {url}\n내용: {widget_text}", None
-            # 위젯 실패 시 일반 텍스트 3000자로 확대 탐색
-            main_content = soup.find(id="ct") or soup.body or soup
-            text = " ".join(main_content.get_text(separator=" ", strip=True).split())
-            snippet = text[:3000] if len(text) > 3000 else text
-        else:
-            # 주가 등 일반 쿼리는 기존 방식 유지
-            main_content = soup.find(id="ct") or soup.body or soup
-            text = " ".join(main_content.get_text(separator=" ", strip=True).split())
-            snippet = text[:1500] if len(text) > 1500 else text
+            try:
+                from bs4 import BeautifulSoup
 
-        if not snippet or len(snippet) < 20:
-            return None, "네이버 스크래핑 파싱 실패: 데이터가 부족합니다."
+                soup = BeautifulSoup(html, "lxml")
+                for tag in soup(["script", "style", "header", "footer", "nav", "noscript", "svg", "button", "img"]):
+                    tag.decompose()
 
-        if not _is_scraping_result_valid(query, snippet):
-            return None, "네이버 스크래핑: 질문에 맞는 실제 데이터를 찾지 못했습니다. (JS 미렌더링 가능성)"
+                if is_weather_query:
+                    widget_text = _scrape_naver_weather_widget(soup)
+                    if widget_text and _is_scraping_result_valid(query, widget_text):
+                        return f"[NAVER_SNIPPET]\nurl={url}\ncontent={widget_text}", None
 
-        return f"[네이버 실시간 검색 화면 요약]\n출처 URL: {url}\n내용: {snippet}", None
+                main_content = soup.find(id="ct") or soup.body or soup
+                text = " ".join(main_content.get_text(separator=" ", strip=True).split())
+            except Exception:
+                text = _clean_html_text(html)
+
+            snippet_limit = 3000 if is_weather_query else 1500
+            snippet = text[:snippet_limit] if len(text) > snippet_limit else text
+
+            if not snippet or len(snippet) < 20:
+                last_error = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551 \ud30c\uc2f1 \uc2e4\ud328: \ub370\uc774\ud130\uac00 \ubd80\uc871\ud569\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+                continue
+
+            if not _is_scraping_result_valid(query, snippet):
+                msg = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551: '{}' \ucffc\ub9ac\uc5d0\uc11c \uc9c8\ubb38\uc5d0 \ub9de\ub294 \uc2e4\uc81c \ub370\uc774\ud130\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+                last_error = msg.format(naver_query)
+                continue
+
+            return f"[NAVER_SNIPPET]\nurl={url}\ncontent={snippet}", None
+
+        default_msg = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551: \uc9c8\ubb38\uc5d0 \ub9de\ub294 \uc2e4\uc81c \ub370\uc774\ud130\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+        return None, last_error or default_msg
     except Exception as error:
-        return None, f"네이버 스크래핑 오류: {error}"
+        prefix = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551 \uc624\ub958".encode("ascii").decode("unicode_escape")
+        return None, f"{prefix}: {error}"
 
 
 def web_search_with_status(query, max_results=3):
-    """검색 소스를 순차적으로 시도하여 유효한 결과를 반환합니다.
-
-    [검색 순서]
-    0단계: 네이버 모바일 직접 스크래핑 (실시간 날씨·주가 카드 우선)
-           → 데이터 검증 실패 시 다음 단계로 자동 이동
-    1단계: Tavily - 국내 주요 도메인 한정 (naver, daum, 언론사 등)
-    2단계: Tavily - 글로벌 전체 검색
-    3단계: DuckDuckGo - 한국어 지역 검색 (kr-kr)
-    """
+    """검색 소스를 순차적으로 시도하여 유효한 결과를 반환합니다."""
     collected_errors = []
+    is_weather_query = any(keyword in query for keyword in ["날씨", "기온", "온도"])
 
-    # 0단계: 네이버 모바일 직접 스크래핑
     naver_result, naver_error = search_naver_direct(query)
     if naver_result:
         return {"content": naver_result, "provider": "naver_scraping", "errors": []}
-    # 검증 실패 시 오류를 기록하고 다음 단계로 진행
+
     collected_errors.append(f"[0단계 네이버 스크래핑] {naver_error}")
 
-    # 실시간 키워드가 포함된 경우 쿼리를 정제하고 오늘 날짜를 주입하여 최신 결과를 유도.
-    # 단, "지금" / "현재" 같은 시간 표현은 검색엔진에 불필요하므로 제거한 뒤 날짜를 붙입니다.
-    fresh_keywords = ["날씨", "주가", "주식", "환율", "현재", "오늘", "내일", "지금", "시세", "뉴스", "최신", "기온", "날짜"]
+    # 날씨 질문은 네이버 카드에서 현재값을 못 건지면 다른 검색 소스로 새지 않게 막습니다.
+    # 그렇지 않으면 과거 날짜나 일반 설명을 끌고 와서 '지금 날씨' 질문에 틀린 답을 만들 수 있습니다.
+    if is_weather_query:
+        return {"content": None, "provider": None, "errors": collected_errors}
+
+    fresh_keywords = ["주가", "주식", "환율", "현재", "오늘", "내일", "지금", "시세", "뉴스", "최신", "날짜"]
     enriched_query = query
     if any(k in query for k in fresh_keywords):
         now_str = datetime.datetime.now().strftime("%Y년 %m월 %d일")
-        # 자연어 시간 표현 제거 후 날짜 조건을 뒤에 붙여 검색 정확도를 높임
-        clean_query = re.sub(r"지금|현재|오늘|", "", query).strip()
-        enriched_query = f"{clean_query} {now_str}"
+        clean_query = re.sub(r"지금|현재|오늘", "", query).strip()
+        enriched_query = f"{clean_query} {now_str}".strip()
 
-    # 1단계: Tavily - 국내 주요 도메인 한정
     kr_domains = ["naver.com", "weather.go.kr", "kma.go.kr", "daum.net", "chosun.com", "mk.co.kr", "hankyung.com", "yna.co.kr"]
     tavily_result_kr, error_kr = search_tavily(enriched_query, max_results, kr_domains)
     if tavily_result_kr:
         return {"content": tavily_result_kr, "provider": "tavily (Korean Domains)", "errors": collected_errors}
     collected_errors.append(f"[1단계 Tavily KR] {error_kr}")
 
-    # 2단계: Tavily - 글로벌 전체 검색
     tavily_result_gl, error_gl = search_tavily(enriched_query, max_results)
     if tavily_result_gl:
         return {"content": tavily_result_gl, "provider": "tavily (Global)", "errors": collected_errors}
     collected_errors.append(f"[2단계 Tavily Global] {error_gl}")
 
-    # 3단계: DuckDuckGo - 한국어 지역 검색
     duckduckgo_result, duckduckgo_error = search_duckduckgo(enriched_query, max_results)
     if duckduckgo_result:
         return {"content": duckduckgo_result, "provider": "duckduckgo (kr-kr)", "errors": collected_errors}
     collected_errors.append(f"[3단계 DuckDuckGo] {duckduckgo_error}")
 
-    # 모든 단계 실패
     return {"content": None, "provider": None, "errors": collected_errors}
-
 
 def web_search(query, max_results=3):
     """web_search_with_status 의 content 만 반환하는 편의 함수입니다."""
