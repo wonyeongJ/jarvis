@@ -1,4 +1,4 @@
-﻿"""요청 라우팅과 응답 생성 흐름을 담당하는 백그라운드 워커입니다.
+"""요청 라우팅과 응답 생성 흐름을 담당하는 백그라운드 워커입니다.
 
 사용자 요청 유형을 분류하고 필요한 검색 단계를 거친 뒤,
 Ollama 응답을 스트리밍 형태로 UI 에 전달합니다.
@@ -64,6 +64,9 @@ class ChatResponseWorker(QThread):
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         request_type = classify_user_request(last_user_message)
 
+        # 검색 대상이면 검색어를 정제하여 문맥을 반영합니다. (날씨 등 후속 질문 처리용)
+        refined_query = self._refine_search_query(last_user_message)
+
         file_command_result = resolve_file_selection_command(last_user_message)
         if file_command_result:
             if file_command_result.startswith("__DELETE_CONFIRM__"):
@@ -78,9 +81,9 @@ class ChatResponseWorker(QThread):
         search_result = None
 
         # 주가 조회 요청은 yfinance 값으로 직접 응답 (LLM 재해석 방지)
-        if is_stock_price_query(last_user_message) and not is_stock_analysis_query(last_user_message):
+        if is_stock_price_query(refined_query) and not is_stock_analysis_query(refined_query):
             self.search_status.emit("📈 주가 데이터를 조회하는 중입니다...")
-            quote_text, quote_error = run_stock_quote(last_user_message)
+            quote_text, quote_error = run_stock_quote(refined_query)
             if quote_text:
                 self.finished.emit(quote_text)
                 return
@@ -89,9 +92,9 @@ class ChatResponseWorker(QThread):
                 return
 
         # ★ 기술적 분석 요청은 request_type에 무관하게 최우선으로 처리
-        if is_stock_analysis_query(last_user_message):
+        if is_stock_analysis_query(refined_query):
             self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
-            analysis_text, analysis_error = run_technical_analysis(last_user_message)
+            analysis_text, analysis_error = run_technical_analysis(refined_query)
             if analysis_text:
                 search_result = analysis_text
                 request_type = "stock_analysis"
@@ -100,10 +103,10 @@ class ChatResponseWorker(QThread):
                     self.finished.emit(analysis_error)
                     return
                 # 종목 미인식 등 → 웹 검색으로 fallback
-                search_result = self._run_web_search(last_user_message)
+                search_result = self._run_web_search(refined_query)
                 if search_result is None:
                     return
-                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                direct_weather_answer = self._build_direct_weather_answer(refined_query, search_result)
                 if direct_weather_answer:
                     self.finished.emit(direct_weather_answer)
                     return
@@ -143,9 +146,9 @@ class ChatResponseWorker(QThread):
                 return
         elif request_type == "web":
             # ★ 기술적 분석 요청이면 yfinance 분석을 먼저 시도
-            if is_stock_analysis_query(last_user_message):
+            if is_stock_analysis_query(refined_query):
                 self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
-                analysis_text, analysis_error = run_technical_analysis(last_user_message)
+                analysis_text, analysis_error = run_technical_analysis(refined_query)
                 if analysis_text:
                     search_result = analysis_text
                     request_type = "stock_analysis"
@@ -155,19 +158,19 @@ class ChatResponseWorker(QThread):
                         return
                     # 종목 미인식 또는 데이터 오류 → 일반 웹 검색으로 fallback
                     self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
-                    search_result = self._run_web_search(last_user_message)
+                    search_result = self._run_web_search(refined_query)
                     if search_result is None:
                         return
-                    direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                    direct_weather_answer = self._build_direct_weather_answer(refined_query, search_result)
                     if direct_weather_answer:
                         self.finished.emit(direct_weather_answer)
                         return
             else:
                 self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
-                search_result = self._run_web_search(last_user_message)
+                search_result = self._run_web_search(refined_query)
                 if search_result is None:
                     return
-                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                direct_weather_answer = self._build_direct_weather_answer(refined_query, search_result)
                 if direct_weather_answer:
                     self.finished.emit(direct_weather_answer)
                     return
@@ -185,11 +188,11 @@ class ChatResponseWorker(QThread):
             self.search_status.emit("🗂 프로젝트 폴더를 분석하는 중입니다...")
             if path_match:
                 search_result = summarize_project_folder(path_match.group(0))
-        elif should_use_web_search(last_user_message):
+        elif should_use_web_search(refined_query):
             # ★ 기술적 분석 요청이면 yfinance 분석을 먼저 시도
-            if is_stock_analysis_query(last_user_message):
+            if is_stock_analysis_query(refined_query):
                 self.search_status.emit("📈 주식 기술적 분석 데이터를 수집하는 중입니다...")
-                analysis_text, analysis_error = run_technical_analysis(last_user_message)
+                analysis_text, analysis_error = run_technical_analysis(refined_query)
                 if analysis_text:
                     search_result = analysis_text
                     request_type = "stock_analysis"
@@ -198,19 +201,19 @@ class ChatResponseWorker(QThread):
                         self.finished.emit(analysis_error)
                         return
                     self.search_status.emit(f"⚠️ 기술적 분석 실패 ({analysis_error}) — 웹 검색으로 전환합니다...")
-                    search_result = self._run_web_search(last_user_message)
+                    search_result = self._run_web_search(refined_query)
                     if search_result is None:
                         return
-                    direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                    direct_weather_answer = self._build_direct_weather_answer(refined_query, search_result)
                     if direct_weather_answer:
                         self.finished.emit(direct_weather_answer)
                         return
             else:
                 self.search_status.emit("🌐 웹 검색을 진행하는 중입니다...")
-                search_result = self._run_web_search(last_user_message)
+                search_result = self._run_web_search(refined_query)
                 if search_result is None:
                     return
-                direct_weather_answer = self._build_direct_weather_answer(last_user_message, search_result)
+                direct_weather_answer = self._build_direct_weather_answer(refined_query, search_result)
                 if direct_weather_answer:
                     self.finished.emit(direct_weather_answer)
                     return
@@ -506,5 +509,52 @@ class ChatResponseWorker(QThread):
             )
 
         return messages
+
+    def _refine_search_query(self, query):
+        """LLM을 사용하여 사용자 질문을 웹 검색(네이버)에 최적화된 키워드로 변환합니다."""
+        # 최근 대화 문맥 추출 (최근 3개 메시지 정도)
+        history_context = []
+        # 현재 history 에 마지막 사용자 메시지가 이미 포함되어 있을 수 있으므로 슬라이싱에 주의
+        # 보통 self.history 에는 현재 요청을 포함한 전체 이력이 들어있음
+        recent_history = self.history[-4:-1] if len(self.history) > 1 else []
+        for msg in recent_history:
+            role_map = {"user": "사용자", "assistant": "어시스턴트", "system": "시스템"}
+            role = role_map.get(msg["role"], msg["role"])
+            history_context.append(f"{role}: {msg['text']}")
+        
+        context_str = "\n".join(history_context) if history_context else "이전 대화 없음"
+        
+        prompt = (
+            "당신은 검색어 최적화 전문가입니다. 사용자의 질문과 대화 문맥을 분석하여 실시간 정보를 찾기 위한 '네이버 검색 키워드' 딱 하나만 출력하세요.\n\n"
+            "[이전 대화 문맥]\n"
+            f"{context_str}\n\n"
+            "[검색어 생성 규칙]\n"
+            "1. 특히 날씨나 미세먼지 질문의 경우, 네이버 날씨 카드가 반드시 나타날 수 있도록 지역명과 '날씨' 키워드를 포함하세요.\n"
+            "2. 동네 이름(동/읍/면)만 있으면 상위 지자체(시/군)를 포함하여 검색어를 만드세요. (예: '고운동 날씨' -> '세종 고운동 날씨')\n"
+            "3. '조치원 말고 고운동' 처럼 비교나 정정 표현이 있으면 최종 목적지인 지역만 남기세요.\n"
+            "4. 이전 대화에서 날씨를 묻고 있었다면, 이번 질문에 '날씨' 단어가 없어도 자동으로 '날씨' 키워드를 붙이세요.\n"
+            "5. 불필요한 수식어나 '알려줘', '어때?' 같은 문장은 모두 제외하고 검색어만 단답형으로 응답하세요.\n\n"
+            f"사용자 질문: {query}\n"
+            "검색어:"
+        )
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": OLLAMA_MEMORY_SAVER_OPTIONS
+        }
+        try:
+            response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=10)
+            if response.status_code == 200:
+                refined = response.json().get("message", {}).get("content", "").strip()
+                # 따옴표나 불필요한 공백 제거
+                refined = re.sub(r'["\']', '', refined).strip()
+                # 간혹 '검색어: 키워드' 형태로 나오는 경우 처리
+                if ":" in refined and len(refined.split(":")[0]) < 10:
+                    refined = refined.split(":", 1)[1].strip()
+                return refined if refined else query
+        except Exception:
+            pass
+        return query
 
 

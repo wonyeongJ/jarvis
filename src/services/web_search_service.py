@@ -1,4 +1,4 @@
-﻿"""간단한 웹 검색과 웹 검색 필요 여부 판단을 담당하는 서비스 모듈입니다."""
+"""간단한 웹 검색과 웹 검색 필요 여부 판단을 담당하는 서비스 모듈입니다."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from core.settings import get_env
 # 네이버 스크래핑 결과가 JS 미렌더링으로 껍데기만 왔을 때를 걸러냅니다.
 # ---------------------------------------------------------------------------
 _QUERY_VALIDATORS = [
-    # 날씨/기온 질문 → 숫자+°C 또는 숫자+도 가 있어야 유효
-    (["날씨", "기온", "온도"], r"\d+(\.\d+)?\s*(°C|℃|도|°)"),
+    # 날씨/기온 질문 → 숫자+단위 또는 날씨 상태 키워드(맑음, 흐림, 비, 눈 등)가 있으면 유효
+    (["날씨", "기온", "온도"], r"\d+(\.\d+)?\s*(°C|℃|도|°)|맑음|흐림|구름|비|눈"),
     # 주가/환율 질문 → 숫자+원 또는 콤마 포함 숫자 가 있어야 유효
     (["주가", "주식", "환율", "시세"], r"\d{1,3}(,\d{3})+|\d+(\.\d+)?\s*원"),
 ]
@@ -116,12 +116,14 @@ def _clean_html_text(fragment: str) -> str:
 
 
 def _extract_naver_weather_from_html(html: str) -> dict[str, str] | None:
-    """Extract current-weather fields from Naver mobile weather card HTML."""
-    if "weather_info" not in html or "temperature_text" not in html:
+    """네이버 모바일 날씨 카드 HTML에서 필드별 데이터를 추출합니다."""
+    # 날씨 카드를 나타내는 핵심 클래스 확인
+    if "temperature_text" not in html and "weather_info" not in html:
         return None
 
     data: dict[str, str] = {}
 
+    # 1. 위치 정보 추출
     location_match = re.search(r'<span class="select_txt">(.*?)</span>', html)
     basis_match = re.search(r'<span class="select_txt_sub">(.*?)</span>', html)
     if location_match:
@@ -129,29 +131,39 @@ def _extract_naver_weather_from_html(html: str) -> dict[str, str] | None:
     if basis_match:
         data["basis"] = _clean_html_text(basis_match.group(1))
 
-    weather_info_match = re.search(r'<div class="weather_info">(.*?)<div class="report_card_wrap">', html, re.DOTALL)
-    if not weather_info_match:
-        return None
-
-    weather_info_html = weather_info_match.group(1)
-    weather_info_text = _clean_html_text(weather_info_html)
-
-    temp_match = re.search(r'현재 온도\s*([0-9][0-9.]*)\s*°', weather_info_text)
+    # 2. 온도 추출 (여러 패턴 대응)
+    # 패턴 A: blind 현재 온도 텍스트 뒤의 수치
+    temp_match = re.search(r'현재 온도</span>([0-9.-]+)', html)
     if not temp_match:
+        # 패턴 B: temperature_text 클래스 내부의 strong 태그
+        temp_match = re.search(r'class="temperature_text".*?>([0-9.-]+)<span>°', html, re.DOTALL)
+    if not temp_match:
+        # 패턴 C: 단순 숫자+° 패키지 소스에서 찾기
+        temp_match = re.search(r'([0-9.-]+)°', html)
+    
+    if temp_match:
+        data["temp"] = temp_match.group(1) + "°"
+    else:
         return None
-    data["temp"] = temp_match.group(1) + "°"
 
-    weather_match = re.search(r'<p class="summary">.*?<span class="weather">(.*?)</span>', weather_info_html, re.DOTALL)
+    # 3. 날씨 상태 (맑음, 흐림 등)
+    weather_match = re.search(r'<span class="weather before_slash">(.*?)</span>', html)
+    if not weather_match:
+        weather_match = re.search(r'<span class="weather">(.*?)</span>', html)
     if weather_match:
         data["weather"] = _clean_html_text(weather_match.group(1))
 
-    summary_match = re.search(r'(어제보다.*?)(?:체감|습도|[남북동서]풍)', weather_info_text)
+    # 4. 요약 문구 (어제보다... 변동폭 포함)
+    summary_match = re.search(r'<p class="summary">(.*?)</p>', html, re.DOTALL)
     if summary_match:
-        data["summary"] = summary_match.group(1).strip()
+        data["summary"] = _clean_html_text(summary_match.group(1))
 
-    feels_like_match = re.search(r'체감\s*([0-9][0-9.]*°)', weather_info_text)
-    humidity_match = re.search(r'습도\s*([0-9]+%)', weather_info_text)
-    wind_match = re.search(r'([남북동서]풍\s*[0-9][0-9.]*m/s)', weather_info_text)
+    # 5. 상세 정보 (체감, 습도, 바람)
+    details_text = _clean_html_text(html)
+    feels_like_match = re.search(r'체감\s*([0-9.-]+°)', details_text)
+    humidity_match = re.search(r'습도\s*([0-9]+%)', details_text)
+    wind_match = re.search(r'([남북동서]풍\s*[0-9.-]+m/s)', details_text)
+    
     if feels_like_match:
         data["feels_like"] = feels_like_match.group(1)
     if humidity_match:
@@ -159,18 +171,20 @@ def _extract_naver_weather_from_html(html: str) -> dict[str, str] | None:
     if wind_match:
         data["wind"] = wind_match.group(1)
 
-    report_card_match = re.search(r'<div class="report_card_wrap">(.*?)</ul>', html, re.DOTALL)
-    if report_card_match:
-        card_text = _clean_html_text(report_card_match.group(1))
-        dust_match = re.search(r'미세먼지\s*([^\s]+)', card_text)
-        ultrafine_match = re.search(r'초미세먼지\s*([^\s]+)', card_text)
-        uv_match = re.search(r'자외선\s*([^\s]+)', card_text)
-        if dust_match:
-            data["dust"] = dust_match.group(1)
-        if ultrafine_match:
-            data["ultrafine_dust"] = ultrafine_match.group(1)
-        if uv_match:
-            data["uv"] = uv_match.group(1)
+    # 6. 대기질 정보
+    report_card_area = re.search(r'<div class="report_card_wrap">(.*?)</ul>', html, re.DOTALL)
+    if report_card_area:
+        report_html = report_card_area.group(1)
+        cards = re.findall(r'<li class="item_?[\w]*">.*?<strong class="item_title">(.*?)</strong>\s*<span class="item_status.*?">(.*?)</span>', report_html, re.DOTALL)
+        for title_html, status_html in cards:
+            title = _clean_html_text(title_html)
+            status = _clean_html_text(status_html)
+            if "미세먼지" in title and "초" not in title:
+                data["dust"] = status
+            elif "초미세먼지" in title:
+                data["ultrafine_dust"] = status
+            elif "자외선" in title:
+                data["uv"] = status
 
     return data
 
@@ -226,56 +240,17 @@ def _scrape_naver_weather_widget(soup):
     return None
 
 
-def _extract_weather_region(query: str) -> str:
-    """Extract a location phrase from a Korean weather question."""
-    region = re.sub(
-        r"\uae30\uc900\uc73c\ub85c|\uae30\uc900|\uc54c\ub824\uc918|\uac00\ub974\uccd0\uc918|\uac00\ub974\uccd0|"
-        r"\uc5b4\ub54c|\uc5b4\ub5a0|\uc5b4\ub5a4\uc9c0|\uc5b4\ub5bb\uac8c|\ub0a0\uc528|\uae30\uc628|\uc628\ub3c4|"
-        r"\ud604\uc7ac|\uc9c0\uae08|\uc624\ub298|\ub0b4\uc77c|\uc694\uc998|\uc774\ubc88\uc8fc|\uc8fc\uac04|"
-        r"\uc880|\ud55c\ubc88|\uc880\s*\uc54c\ub824\uc918",
-        " ",
-        query,
-    )
-    region = re.sub(r"\s+", " ", region).strip(" ,")
-    return region
-
-
 def _build_weather_queries(query):
-    """Build prioritized weather queries for Naver search."""
-    region = _extract_weather_region(query)
-    candidates = []
-
-    if region:
-        candidates.extend(
-            [
-                f"{region} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
-                f"{region} \ub0a0\uc528",
-                f"{region} \ud604\uc7ac \ub0a0\uc528",
-            ]
-        )
-
-        if region.startswith("\uc138\uc885 "):
-            expanded = region.replace("\uc138\uc885 ", "\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc ", 1)
-            candidates.extend(
-                [
-                    f"{expanded} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
-                    f"{expanded} \ub0a0\uc528",
-                    f"{expanded} \ud604\uc7ac \ub0a0\uc528",
-                ]
-            )
-
-        if "\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc" in region and "\uc138\uc885 " not in region:
-            shortened = region.replace("\uc138\uc885\ud2b9\ubcc4\uc790\uce58\uc2dc", "\uc138\uc885", 1).strip()
-            if shortened:
-                candidates.extend(
-                    [
-                        f"{shortened} \ud604\uc7ac \ub0a0\uc528 \uae30\uc628",
-                        f"{shortened} \ub0a0\uc528",
-                    ]
-                )
-
-    candidates.append("\uc624\ub298 \ub0a0\uc528 \ud604\uc7ac \uae30\uc628")
-
+    """지정된 지역의 날씨 검색을 위한 쿼리 목록을 만듭니다.
+    네이버 실시간 날씨 카드를 호출하기 위해 최적화된 키워드를 사용합니다.
+    """
+    candidates = [
+        f"{query} 날씨",
+        f"{query} 현재 날씨",
+        f"{query} 현재 기온",
+        "오늘 날씨 현재 기온"
+    ]
+    
     deduped = []
     seen = set()
     for candidate in candidates:
@@ -283,13 +258,14 @@ def _build_weather_queries(query):
         if normalized and normalized not in seen:
             seen.add(normalized)
             deduped.append(normalized)
+    return deduped
 
     return deduped
 
 
 def search_naver_direct(query):
     """Scrape Naver mobile search results for weather or stock widgets."""
-    is_weather_query = any(k in query for k in ["\ub0a0\uc528", "\uae30\uc628", "\uc628\ub3c4"])
+    is_weather_query = any(k in query for k in ["날씨", "기온", "온도"])
 
     try:
         import urllib.parse
@@ -338,20 +314,20 @@ def search_naver_direct(query):
             snippet = text[:snippet_limit] if len(text) > snippet_limit else text
 
             if not snippet or len(snippet) < 20:
-                last_error = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551 \ud30c\uc2f1 \uc2e4\ud328: \ub370\uc774\ud130\uac00 \ubd80\uc871\ud569\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+                last_error = "네이버 스크래핑 파싱 실패: 데이터가 부족합니다."
                 continue
 
             if not _is_scraping_result_valid(query, snippet):
-                msg = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551: '{}' \ucffc\ub9ac\uc5d0\uc11c \uc9c8\ubb38\uc5d0 \ub9de\ub294 \uc2e4\uc81c \ub370\uc774\ud130\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+                msg = "네이버 스크래핑: '{}' 쿼리에서 질문에 맞는 실제 데이터를 찾지 못했습니다."
                 last_error = msg.format(naver_query)
                 continue
 
             return f"[NAVER_SNIPPET]\nurl={url}\ncontent={snippet}", None
 
-        default_msg = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551: \uc9c8\ubb38\uc5d0 \ub9de\ub294 \uc2e4\uc81c \ub370\uc774\ud130\ub97c \ucc3e\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4.".encode("ascii").decode("unicode_escape")
+        default_msg = "네이버 스크래핑: 질문에 맞는 실제 데이터를 찾지 못했습니다."
         return None, last_error or default_msg
     except Exception as error:
-        prefix = "\ub124\uc774\ubc84 \uc2a4\ud06c\ub798\ud551 \uc624\ub958".encode("ascii").decode("unicode_escape")
+        prefix = "네이버 스크래핑 오류"
         return None, f"{prefix}: {error}"
 
 

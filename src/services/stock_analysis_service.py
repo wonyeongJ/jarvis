@@ -12,64 +12,59 @@ import sys
 from typing import Optional
 
 
-def _u(s: str) -> str:
-    """Decode ASCII unicode-escape literals to Korean text."""
-    return s.encode("ascii").decode("unicode_escape")
-
-
 KOREAN_STOCK_MAP: dict[str, tuple[str, str]] = {
-    _u("\\uc0bc\\uc131\\uc804\\uc790"): ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
-    _u("\\uc0bc\\uc131"): ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
-    "samsung": ("005930.KS", _u("\\uc0bc\\uc131\\uc804\\uc790")),
-    _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4"): ("000660.KS", _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4")),
-    _u("\\ud558\\uc774\\ub2c9\\uc2a4"): ("000660.KS", _u("\\uc5d0\\uc2a4\\ucf00\\uc774\\ud558\\uc774\\ub2c9\\uc2a4")),
-    _u("\\ub124\\uc774\\ubc84"): ("035420.KS", "NAVER"),
+    "삼성전자": ("005930.KS", "삼성전자"),
+    "삼성": ("005930.KS", "삼성전자"),
+    "samsung": ("005930.KS", "삼성전자"),
+    "에스케이하이닉스": ("000660.KS", "에스케이하이닉스"),
+    "하이닉스": ("000660.KS", "에스케이하이닉스"),
+    "네이버": ("035420.KS", "NAVER"),
     "naver": ("035420.KS", "NAVER"),
-    _u("\\uce74\\uce74\\uc624"): ("035720.KQ", _u("\\uce74\\uce74\\uc624")),
-    _u("\\ud604\\ub300\\ucc28"): ("005380.KS", _u("\\ud604\\ub300\\uc790\\ub3d9\\ucc28")),
-    _u("\\uae30\\uc544"): ("000270.KS", _u("\\uae30\\uc544")),
-    _u("\\ucf54\\uc2a4\\ud53c"): ("^KS11", "KOSPI"),
+    "카카오": ("035720.KQ", "카카오"),
+    "현대차": ("005380.KS", "현대차"),
+    "기아": ("000270.KS", "기아"),
+    "코스피": ("^KS11", "KOSPI"),
     "kospi": ("^KS11", "KOSPI"),
-    _u("\\ucf54\\uc2a4\\ub2e5"): ("^KQ11", "KOSDAQ"),
+    "코스닥": ("^KQ11", "KOSDAQ"),
     "kosdaq": ("^KQ11", "KOSDAQ"),
-    _u("\\uc560\\ud50c"): ("AAPL", "Apple"),
+    "애플": ("AAPL", "Apple"),
     "apple": ("AAPL", "Apple"),
     "aapl": ("AAPL", "Apple"),
-    _u("\\uc5d4\\ube44\\ub514\\uc544"): ("NVDA", "NVIDIA"),
+    "엔비디아": ("NVDA", "NVIDIA"),
     "nvidia": ("NVDA", "NVIDIA"),
     "nvda": ("NVDA", "NVIDIA"),
-    _u("\\ud14c\\uc2ac\\ub77c"): ("TSLA", "Tesla"),
+    "테슬라": ("TSLA", "Tesla"),
     "tesla": ("TSLA", "Tesla"),
     "tsla": ("TSLA", "Tesla"),
-    _u("\\ub9c8\\uc774\\ud06c\\ub85c\\uc18c\\ud504\\ud2b8"): ("MSFT", "Microsoft"),
+    "마이크로소프트": ("MSFT", "Microsoft"),
     "microsoft": ("MSFT", "Microsoft"),
     "msft": ("MSFT", "Microsoft"),
 }
 
 ANALYSIS_ACTION_KEYWORDS = [
-    _u("\\ubd84\\uc11d"),
-    _u("\\uae30\\uc220\\uc801 \\ubd84\\uc11d"),
-    _u("\\uc608\\uce21"),
-    _u("\\uc804\\ub9dd"),
+    "분석",
+    "기술적 분석",
+    "예측",
+    "전략",
     "rsi",
     "macd",
-    _u("\\ubcfc\\ub9b0\\uc800"),
+    "볼린저밴드",
 ]
 
 PRICE_ACTION_KEYWORDS = [
-    _u("\\uc8fc\\uac00"),
-    _u("\\uc2dc\\uc138"),
-    _u("\\uac00\\uaca9"),
-    _u("\\uc5bc\\ub9c8"),
-    _u("\\ud604\\uc7ac\\uac00"),
+    "주가",
+    "시세",
+    "가격",
+    "얼마",
+    "현재가",
 ]
 
 STOCK_CONTEXT_KEYWORDS = [
-    _u("\\uc8fc\\uc2dd"),
-    _u("\\uc885\\ubaa9"),
-    _u("\\uc8fc\\uac00"),
-    _u("\\ucf54\\uc2a4\\ud53c"),
-    _u("\\ucf54\\uc2a4\\ub2e5"),
+    "주식",
+    "종목",
+    "주가",
+    "코스피",
+    "코스닥",
 ]
 
 
@@ -188,12 +183,12 @@ def run_stock_quote(query: str) -> tuple[Optional[str], Optional[str]]:
 
     ticker_code, company_name = _resolve_ticker(query)
     if not ticker_code:
-        return None, _u("\\uc885\\ubaa9\\uba85\\uc744 \\uc778\\uc2dd\\ud558\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4. \\uc608: '\\uc0bc\\uc131\\uc804\\uc790 \\uc8fc\\uac00 \\uc54c\\ub824\\uc918'")
+        return None, "종목명을 인식하지 못했습니다. 예: '삼성전자 주가 알려줘'"
 
     try:
         df = yf.Ticker(ticker_code).history(period="5d", interval="1d")
         if df.empty:
-            return None, _u("\\uac00\\uaca9 \\ub370\\uc774\\ud130\\ub97c \\uac00\\uc838\\uc624\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4.")
+            return None, "가격 데이터를 가져오지 못했습니다."
 
         close = df["Close"]
         current = float(close.iloc[-1])
@@ -226,12 +221,12 @@ def run_technical_analysis(query: str) -> tuple[Optional[str], Optional[str]]:
 
     ticker_code, company_name = _resolve_ticker(query)
     if not ticker_code:
-        return None, _u("\\uc885\\ubaa9\\uba85\\uc744 \\uc778\\uc2dd\\ud558\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4. \\uc608: '\\uc0bc\\uc131\\uc804\\uc790 \\uc8fc\\uac00 \\uc608\\uce21\\ud574\\uc918'")
+        return None, "종목명을 인식하지 못했습니다. 예: '삼성전자 주가 예상해줘'"
 
     try:
         df = yf.Ticker(ticker_code).history(period="3mo")
         if df.empty:
-            return None, _u("\\uac00\\uaca9 \\ub370\\uc774\\ud130\\ub97c \\uac00\\uc838\\uc624\\uc9c0 \\ubabb\\ud588\\uc2b5\\ub2c8\\ub2e4.")
+            return None, "가격 데이터를 가져오지 못했습니다."
 
         close = df["Close"]
         current = float(close.iloc[-1])
