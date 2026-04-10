@@ -40,7 +40,7 @@ from app.chat_session import ChatSession
 from app.chat_stream_state import ChatStreamState
 from core.paths import resource_path, writable_path
 from core.settings import get_ollama_model_name
-from core.request_routing import looks_like_error_report
+from core.request_routing import classify_user_request, looks_like_error_report
 from repositories.chat_repository import ChatRepository, DEFAULT_CHAT_TITLE, make_title
 from services.file_action_service import copy_path_to_desktop, move_path_to_recycle_bin
 from services.search_facade import is_everything_available, launch_everything, warm_up_rag_backend
@@ -396,7 +396,24 @@ class JarvisMainWindow(QMainWindow):
             self._show_mode_badge("🧯 오류 분석 모드")
 
         self.append_user_message(text)
-        self.stream_state.start_stream(self._append_temporary_assistant_bubble("..."))
+        # 질문 직후부터 "해당 질문에 맞는" 로딩 상태가 보이도록,
+        # 워커를 기다리지 않고 UI에서 먼저 분류해 상태 말풍선을 띄웁니다.
+        self.stream_state.reset_stream()
+        request_type = classify_user_request(text)
+        initial_status_map = {
+            "pc": "🔎 PC 파일을 검색하는 중입니다...",
+            "rag": "📚 내부 문서를 검색하는 중입니다...",
+            "web": "🌐 웹 검색을 진행하는 중입니다...",
+            "error": "🧯 오류 내용을 분석하는 중입니다...",
+            "sql": "🗄 SQL 답변을 준비하는 중입니다...",
+            "regex": "🧩 정규식을 생성하는 중입니다...",
+            "dev": "💻 코드 답변을 준비하는 중입니다...",
+            "folder": "🗂 프로젝트 폴더를 분석하는 중입니다...",
+        }
+        initial_status = initial_status_map.get(request_type)
+        if initial_status:
+            bubble = self._append_temporary_assistant_bubble(initial_status)
+            self.stream_state.start_stream(bubble)
 
         if len(self.chat_session.messages) == 1:
             title = make_title(text)
@@ -473,13 +490,18 @@ class JarvisMainWindow(QMainWindow):
 
     def handle_stream_token(self, token):
         """Buffer stream tokens and start typing timer."""
+        if not self.stream_state.bubble:
+            self.stream_state.start_stream(self._append_temporary_assistant_bubble(""))
         self.stream_state.append_chunk(token)
         if not self._stream_flush_timer.isActive():
             self._stream_flush_timer.start(15)  # 15ms 간격으로 더 기민하게 반응
 
     def handle_search_status(self, message):
         """Show a temporary search status bubble."""
-        self._remove_pending_status_bubble()
+        # 이미 상태 말풍선이 있으면 새로 만들지 않고 텍스트만 갱신(깜빡임 방지)
+        if self.stream_state.bubble:
+            self.stream_state.render_to_bubble(message)
+            return
         self.stream_state.start_stream(self._append_temporary_assistant_bubble(message))
 
     def handle_pc_search_results(self, items):

@@ -8,6 +8,7 @@ import re
 import requests
 
 from core.settings import get_env
+from services.forecast_service import get_tomorrow_forecast_from_open_meteo
 
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,86 @@ _QUERY_VALIDATORS = [
     (["주가", "주식", "환율", "시세"], r"\d{1,3}(,\d{3})+|\d+(\.\d+)?\s*원"),
 ]
 
+_FORECAST_KEYWORDS = ["내일", "모레", "주간", "이번주", "다음주", "주말", "예보", "시간별", "내일날씨"]
+
+
+def _is_forecast_weather_query(query: str) -> bool:
+    """날씨 질문 중에서도 '예보/미래' 요청인지 판단합니다."""
+    normalized = (query or "").replace(" ", "")
+    return any(k.replace(" ", "") in normalized for k in _FORECAST_KEYWORDS)
+
+
+def _is_weather_query_text(query: str) -> bool:
+    """'날씨' 단어가 없어도 예보 키워드면 날씨 질의로 취급합니다."""
+    q = query or ""
+    return any(k in q for k in ["날씨", "기온", "온도"]) or _is_forecast_weather_query(q)
+
+
+def _extract_weather_location_tokens(query: str) -> list[str]:
+    """날씨 검색어에서 지역 토큰을 대략 추출합니다. (예: '세종 고운동 내일 날씨' -> ['세종', '고운동'])"""
+    if not query:
+        return []
+    normalized = re.sub(r"\s+", " ", query).strip()
+    # 시간/날씨 관련 단어 제거
+    normalized = re.sub(r"(내일|모레|오늘|지금|현재|주간|이번주|다음주|주말|예보|시간별)", " ", normalized)
+    normalized = re.sub(r"(날씨|기온|온도)", " ", normalized)
+    tokens = [t for t in normalized.split(" ") if t]
+    # 너무 짧은 토큰은 제외
+    tokens = [t for t in tokens if len(t) >= 2]
+    return tokens[:2]
+
+
+def _extract_forecast_snippet_from_html(html: str, location_tokens: list[str]) -> str | None:
+    """예보(내일/시간별/최저·최고 등) 텍스트가 HTML에 존재할 때, 관련 구간을 짧게 추출합니다."""
+    if not html:
+        return None
+    text = _clean_html_text(html)
+    if location_tokens and not any(tok in text for tok in location_tokens):
+        return None
+    # 예보 단서가 있는 경우에만 반환
+    forecast_markers = ["내일", "모레", "오전", "오후", "시간별", "최저", "최고", "강수", "확률"]
+    if not any(m in text for m in forecast_markers):
+        return None
+    # 온도/강수처럼 숫자 단서도 같이 있으면 더 신뢰
+    has_numbers = bool(re.search(r"\d+(\.\d+)?\s*(°C|℃|도|°|mm|%)", text))
+    if not has_numbers:
+        # 숫자가 전혀 없으면 예보 정보로 쓰기 애매
+        return None
+
+    # 단순 "네이버 검색" 같은 UI 문구만 잡히는 경우를 방지하기 위해,
+    # 날씨 상태 단서(맑음/흐림/비/눈 등) 또는 최저·최고 표식이 실제로 포함되어야 합니다.
+    weather_state_markers = ["맑음", "흐림", "구름", "비", "눈", "소나기", "천둥", "번개", "미세먼지"]
+    has_weather_state = any(m in text for m in weather_state_markers)
+    has_minmax = ("최저" in text) or ("최고" in text)
+    if not (has_weather_state or has_minmax):
+        return None
+
+    # '내일' 주변을 우선으로 잘라냅니다.
+    idx = text.find("내일")
+    if idx == -1:
+        # 다른 마커라도 있는 곳을 기준으로 잘라냄
+        for m in forecast_markers:
+            idx = text.find(m)
+            if idx != -1:
+                break
+    if idx == -1:
+        return None
+
+    start = max(0, idx - 200)
+    end = min(len(text), idx + 600)
+    snippet = text[start:end].strip()
+    snippet = " ".join(snippet.split())
+    if not snippet:
+        return None
+    # 잘라낸 스니펫에도 예보 단서 + 수치 단서가 실제로 들어있는지 재검증
+    if not any(m in snippet for m in forecast_markers):
+        return None
+    if not re.search(r"\d+(\.\d+)?\s*(°C|℃|도|°|mm|%)", snippet):
+        return None
+    # UI 잡음 제거: "네이버 검색"만 남는 경우 차단
+    if "네이버 검색" in snippet and not (any(m in snippet for m in weather_state_markers) or ("최저" in snippet) or ("최고" in snippet)):
+        return None
+    return snippet[:1200]
 
 def _is_scraping_result_valid(query: str, snippet: str) -> bool:
     """스크래핑 결과에 질문 유형에 맞는 실제 데이터가 있는지 검증합니다.
@@ -244,12 +325,25 @@ def _build_weather_queries(query):
     """지정된 지역의 날씨 검색을 위한 쿼리 목록을 만듭니다.
     네이버 실시간 날씨 카드를 호출하기 위해 최적화된 키워드를 사용합니다.
     """
-    candidates = [
-        f"{query} 날씨",
-        f"{query} 현재 날씨",
-        f"{query} 현재 기온",
-        "오늘 날씨 현재 기온"
-    ]
+    # base query에 이미 '날씨/기온/현재' 등이 붙어 있으면 중복으로 더 붙지 않게 정리
+    base = re.sub(r"\s+", " ", (query or "").strip())
+    base = re.sub(r"(현재\s*)?(날씨|기온|온도)\s*$", "", base).strip()
+    is_forecast = _is_forecast_weather_query(query)
+    if is_forecast:
+        candidates = [
+            f"{base} 내일 날씨",
+            f"{base} 내일 기온",
+            f"{base} 시간별 날씨",
+            f"{base} 예보",
+            f"{base} 주간 날씨",
+        ]
+    else:
+        candidates = [
+            f"{base} 날씨",
+            f"{base} 현재 날씨",
+            f"{base} 현재 기온",
+            "오늘 날씨 현재 기온",
+        ]
     
     deduped = []
     seen = set()
@@ -265,7 +359,9 @@ def _build_weather_queries(query):
 
 def search_naver_direct(query):
     """Scrape Naver mobile search results for weather or stock widgets."""
-    is_weather_query = any(k in query for k in ["날씨", "기온", "온도"])
+    is_weather_query = _is_weather_query_text(query)
+    is_forecast_weather = _is_forecast_weather_query(query) if is_weather_query else False
+    location_tokens = _extract_weather_location_tokens(query) if is_weather_query else []
 
     try:
         import urllib.parse
@@ -273,6 +369,7 @@ def search_naver_direct(query):
 
         candidate_queries = _build_weather_queries(query) if is_weather_query else [query]
         last_error = None
+        forecast_markers = ["내일", "모레", "주간", "이번주", "다음주", "주말", "예보", "시간별", "오전", "오후", "최저", "최고", "강수"]
 
         for naver_query in candidate_queries:
             url = f"https://m.search.naver.com/search.naver?query={urllib.parse.quote(naver_query)}"
@@ -288,7 +385,15 @@ def search_naver_direct(query):
             )
             html = urllib.request.urlopen(req, timeout=5).read().decode("utf-8", errors="ignore")
 
-            if is_weather_query:
+            # 예보 질의는 위젯 셀렉터가 놓치는 경우가 있어, HTML 전체 텍스트에서 예보 스니펫을 먼저 시도합니다.
+            if is_weather_query and is_forecast_weather:
+                forecast_snippet = _extract_forecast_snippet_from_html(html, location_tokens)
+                if forecast_snippet:
+                    return f"[NAVER_SNIPPET]\nurl={url}\ncontent={forecast_snippet}", None
+
+            # 예보(내일/주간 등) 질의는 '현재 온도' 카드 파싱([NAVER_WEATHER])을 타면 잘못된 직답이 나오기 쉽습니다.
+            # 따라서 예보 질의는 현재 카드 파싱을 건너뛰고, 예보 텍스트가 포함된 위젯/스니펫만 사용합니다.
+            if is_weather_query and not is_forecast_weather:
                 weather_data = _extract_naver_weather_from_html(html)
                 if weather_data:
                     return _format_naver_weather_result(weather_data, url), None
@@ -302,8 +407,19 @@ def search_naver_direct(query):
 
                 if is_weather_query:
                     widget_text = _scrape_naver_weather_widget(soup)
-                    if widget_text and _is_scraping_result_valid(query, widget_text):
-                        return f"[NAVER_SNIPPET]\nurl={url}\ncontent={widget_text}", None
+                    if widget_text:
+                        # 지역이 섞여 들어오는 경우(세종 질문인데 서울 위젯 등)를 거르기 위해
+                        # 질의에서 추출한 지역 토큰이 위젯 텍스트에 포함되는 경우만 채택합니다.
+                        if location_tokens and not any(token in widget_text for token in location_tokens):
+                            continue
+                        if is_forecast_weather:
+                            # '내일/모레/주간/예보/시간별' 같은 단서가 실제로 포함되어야 예보로 인정
+                            has_marker = any(m in widget_text for m in forecast_markers)
+                            has_temp = bool(re.search(r"\d+(\.\d+)?\s*(°C|℃|도|°)", widget_text))
+                            if has_marker and (has_temp or _is_scraping_result_valid(query, widget_text)):
+                                return f"[NAVER_SNIPPET]\nurl={url}\ncontent={widget_text}", None
+                        elif _is_scraping_result_valid(query, widget_text):
+                            return f"[NAVER_SNIPPET]\nurl={url}\ncontent={widget_text}", None
 
                 main_content = soup.find(id="ct") or soup.body or soup
                 text = " ".join(main_content.get_text(separator=" ", strip=True).split())
@@ -322,6 +438,15 @@ def search_naver_direct(query):
                 last_error = msg.format(naver_query)
                 continue
 
+            # 예보 질의인데도 본문 스니펫이 '현재' 중심이면 오답이 나기 쉬우므로 반환하지 않습니다.
+            if is_weather_query and is_forecast_weather:
+                if location_tokens and not any(token in snippet for token in location_tokens):
+                    last_error = "네이버 스크래핑: 예보 스니펫에서 요청 지역을 확인하지 못했습니다."
+                    continue
+                if not any(m in snippet for m in forecast_markers):
+                    last_error = "네이버 스크래핑: 예보 스니펫에서 '내일/예보' 단서를 확인하지 못했습니다."
+                    continue
+
             return f"[NAVER_SNIPPET]\nurl={url}\ncontent={snippet}", None
 
         default_msg = "네이버 스크래핑: 질문에 맞는 실제 데이터를 찾지 못했습니다."
@@ -334,7 +459,32 @@ def search_naver_direct(query):
 def web_search_with_status(query, max_results=3):
     """검색 소스를 순차적으로 시도하여 유효한 결과를 반환합니다."""
     collected_errors = []
-    is_weather_query = any(keyword in query for keyword in ["날씨", "기온", "온도"])
+    is_weather_query = _is_weather_query_text(query)
+    is_forecast_weather = _is_forecast_weather_query(query) if is_weather_query else False
+
+    # 예보(내일/주간 등)는 네이버가 JS 렌더링이라 스크래핑이 자주 실패합니다.
+    # 키 없이 안정적으로 가져올 수 있는 Open-Meteo 예보를 우선 시도합니다.
+    if is_weather_query and is_forecast_weather:
+        try:
+            fc = get_tomorrow_forecast_from_open_meteo(query)
+            if fc:
+                lines = [
+                    "[OPEN_METEO_FORECAST]",
+                    f"url={fc.source_url}",
+                    f"location={fc.location_name}",
+                    f"date={fc.date}",
+                ]
+                if fc.weather_summary:
+                    lines.append(f"summary={fc.weather_summary}")
+                if fc.tmin_c is not None:
+                    lines.append(f"tmin_c={fc.tmin_c}")
+                if fc.tmax_c is not None:
+                    lines.append(f"tmax_c={fc.tmax_c}")
+                if fc.precip_prob_max is not None:
+                    lines.append(f"precip_prob_max={fc.precip_prob_max}")
+                return {"content": "\n".join(lines), "provider": "open_meteo", "errors": []}
+        except Exception as error:
+            collected_errors.append(f"[예보 Open-Meteo] {error}")
 
     naver_result, naver_error = search_naver_direct(query)
     if naver_result:
@@ -342,9 +492,10 @@ def web_search_with_status(query, max_results=3):
 
     collected_errors.append(f"[0단계 네이버 스크래핑] {naver_error}")
 
-    # 날씨 질문은 네이버 카드에서 현재값을 못 건지면 다른 검색 소스로 새지 않게 막습니다.
+    # '현재 날씨' 질문은 네이버 카드에서 현재값을 못 건지면 다른 검색 소스로 새지 않게 막습니다.
     # 그렇지 않으면 과거 날짜나 일반 설명을 끌고 와서 '지금 날씨' 질문에 틀린 답을 만들 수 있습니다.
-    if is_weather_query:
+    # 단, 예보(내일/주간 등) 질문은 네이버 카드 파싱 실패 시 다른 소스를 허용합니다.
+    if is_weather_query and not is_forecast_weather:
         return {"content": None, "provider": None, "errors": collected_errors}
 
     fresh_keywords = ["주가", "주식", "환율", "현재", "오늘", "내일", "지금", "시세", "뉴스", "최신", "날짜"]

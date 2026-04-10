@@ -583,13 +583,14 @@ class ChatMessageBubble(QWidget):
         if is_user:
             label = QLabel(text)
             label.setWordWrap(True)
-            label.setMinimumWidth(80)
-            label.setMaximumWidth(760)
+            # 사용자 말풍선이 지나치게 세로로 길어지는 것을 방지하기 위해
+            # 최소 폭을 확보하고(너무 좁게 줄바꿈되지 않게), 어시스턴트 말풍선과 비슷한 폭으로 제한합니다.
+            label.setMinimumWidth(320)
+            label.setMaximumWidth(680)
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             label.setStyleSheet(USER_MESSAGE_STYLE)
-            row.addStretch()
-            row.addWidget(label)
+            row.addWidget(label, 0, Qt.AlignRight)
             outer.addLayout(row)
 
             time_label = QLabel(time_str)
