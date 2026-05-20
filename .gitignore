@@ -1,4 +1,4 @@
-﻿# Python cache
+# Python cache
 __pycache__/
 *.py[cod]
 
@@ -28,3 +28,9 @@ model_cache/
 .env
 .env.*
 !.env.example
+
+# Everything engine runtime files
+assets/everything/*.db
+assets/everything/*.db.tmp
+assets/everything/*.csv
+
