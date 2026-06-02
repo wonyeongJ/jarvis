@@ -9,7 +9,7 @@ import time
 
 import requests
 
-from core.paths import resource_path
+from core.paths import resource_path, writable_path
 from core.settings import get_everything_port
 from services.file_action_service import open_parent_folder, open_path
 
@@ -60,11 +60,112 @@ def is_everything_available():
         return False
 
 
+def _kill_all_everything_processes():
+    """실행 중인 모든 Everything.exe 프로세스를 강제 종료합니다."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "Everything.exe"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+
+def _is_jarvis_everything_running():
+    """현재 실행 중인 Everything.exe가 Jarvis assets 버전인지 확인합니다."""
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "Get-WmiObject Win32_Process -Filter \"Name='everything.exe'\" | Select-Object -ExpandProperty ExecutablePath",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=5,
+        )
+        running_paths = [p.strip().lower() for p in result.stdout.strip().splitlines() if p.strip()]
+        jarvis_exe = os.path.join(EVERYTHING_BASE_DIR, "Everything.exe").lower()
+        return any(p == jarvis_exe for p in running_paths)
+    except Exception:
+        return False
+
+
+def _is_everything_service_installed():
+    """Windows 서비스 목록에 Everything 이 등록되어 있는지 확인합니다."""
+    try:
+        result = subprocess.run(
+            ["sc", "query", "Everything"],
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=3,
+        )
+        return "Everything" in result.stdout
+    except Exception:
+        return False
+
+
+def _install_everything_service(executable_path):
+    """Everything 서비스를 관리자 권한으로 설치합니다 (최초 1회 UAC 팝업 발생)."""
+    try:
+        # PowerShell의 Start-Process -Verb RunAs 를 사용하여 
+        # UAC 팝업을 띄우고 Everything.exe -install-service 를 실행합니다.
+        cmd = f"Start-Process -FilePath '{executable_path}' -ArgumentList '-install-service' -Verb RunAs -WindowStyle Hidden"
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=10,
+        )
+        time.sleep(2.0)
+    except Exception as e:
+        print("Everything 서비스 설치 실패:", e)
+
+
+def _update_appdata_everything_ini(port):
+    """APPDATA 경로의 Everything.ini 파일을 완전히 깨끗하고 안전한 기본 설정으로 덮어씁니다."""
+    appdata_dir = os.path.join(os.environ["APPDATA"], "Everything")
+    os.makedirs(appdata_dir, exist_ok=True)
+    ini_path = os.path.join(appdata_dir, "Everything.ini")
+
+    # UAC 방지, 서비스 사용, HTTP 서버 활성화 및 고정 볼륨 자동 인덱싱 설정 강제화
+    ini_content = f"""[Everything]
+run_as_admin=0
+everything_service=1
+http_server_enabled=1
+http_server_port={port}
+allow_http_server=1
+run_in_background=1
+show_tray_icon=1
+minimize_to_tray=1
+close_on_execute=0
+auto_include_fixed_volumes=1
+"""
+    try:
+        with open(ini_path, "w", encoding="utf-8") as f:
+            f.write(ini_content)
+    except Exception as e:
+        print("Everything.ini 파일 쓰기 실패:", e)
+
+
 def start_everything():
-    """Everything 이 설치되어 있고 실행 중이 아니면 실행합니다."""
+    """Everything 이 설치되어 있고 실행 중이 아니면 실행합니다.
+
+    시스템에 설치된 다른 Everything(HTTP 서버 비활성) 이 실행 중인 경우에도
+    Jarvis assets 버전(HTTP 서버 활성)으로 교체합니다.
+    """
     executable_path = os.path.join(EVERYTHING_BASE_DIR, "Everything.exe")
     if not os.path.exists(executable_path):
         return
+
+    # Windows 서비스 등록 확인 및 자동 설치 (최초 1회 UAC 권한 요구)
+    if not _is_everything_service_installed():
+        _install_everything_service(executable_path)
+
+    # APPDATA의 Everything.ini 파일을 업데이트하여 서비스 사용 및 포트를 바인딩시킵니다.
+    _update_appdata_everything_ini(EVERYTHING_PORT)
 
     if is_everything_available():
         return
@@ -77,19 +178,22 @@ def start_everything():
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if "Everything.exe" in result.stdout:
-            # 프로세스는 있지만 응답이 없는 상태이므로 재시작 시도
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "Everything.exe"],
-                capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            time.sleep(1)
+            # 프로세스가 있지만 HTTP 서버 응답 없음 →
+            # Jarvis assets 버전이 아닌 다른 인스턴스가 포트를 차지하고 있을 수 있으므로
+            # 모두 종료하고 assets 버전으로 교체한다.
+            _kill_all_everything_processes()
     except Exception:
         pass
 
-    # Everything.ini의 설정을 존중하여 백그라운드(-startup)로만 실행합니다.
+    # -startup 플래그로 윈도우 창이 팝업되지 않고 백그라운드 트레이로 조용히 실행합니다.
+    # 커스텀 config/db 지정을 없애 윈도우 백그라운드 서비스와 정상적으로 데이터베이스를 연동합니다.
+    cmd_args = [
+        executable_path,
+        "-startup"
+    ]
+
     subprocess.Popen(
-        [executable_path, "-startup"],
+        cmd_args,
         cwd=EVERYTHING_BASE_DIR,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )

@@ -23,6 +23,31 @@ model_cache/
 .vscode/
 .idea/
 *.log
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec.bak
+
+# Runtime data
+data/
+chats/
+backups/
+vectordb/
+hf_cache/
+model_cache/
+
+# OS/editor
+.vscode/
+.idea/
+*.log
 
 # Local secrets
 .env
@@ -33,4 +58,8 @@ model_cache/
 assets/everything/*.db
 assets/everything/*.db.tmp
 assets/everything/*.csv
+assets/everything/*.tmp
 
+
+# Build package zip
+jarvis_package.zip

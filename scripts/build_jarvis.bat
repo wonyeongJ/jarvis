@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 setlocal EnableExtensions
 
 set "SCRIPT_DIR=%~dp0"
@@ -94,47 +94,54 @@ exit /b 0
 
 :fail_venv
 echo *** Failed to activate venv ***
+pause
 popd
 exit /b 1
 
 :fail_pyinstaller
 echo *** Failed to check/install PyInstaller ***
+pause
 popd
 exit /b 1
 
 :fail_primp
 echo *** Failed to install primp ***
+pause
 popd
 exit /b 1
 
 :fail_dist_locked
 echo *** Failed to remove dist folder. Another process is still using it. ***
+pause
 popd
 exit /b 1
 
 :fail_zip_locked
 echo *** Failed to remove existing ZIP file. Close any program using jarvis_package.zip, then try again. ***
+pause
 popd
 exit /b 1
 
 :fail_build
 echo *** Build failed ***
+pause
 popd
 exit /b 1
 
 :fail_missing_exe
 echo *** Build finished without creating jarvis.exe ***
+pause
 popd
 exit /b 1
 
 :fail_zip
 echo *** ZIP creation failed ***
+pause
 popd
 exit /b 1
 
-
-
 :fail_yfinance
 echo *** Failed to install yfinance ***
+pause
 popd
 exit /b 1
