@@ -609,12 +609,18 @@ class ChatMessageBubble(QWidget):
             row.addStretch()
             outer.addLayout(row)
 
-            time_label = QLabel(time_str)
-            time_label.setStyleSheet(TIMESTAMP_LEFT_STYLE)
-            time_label.setAlignment(Qt.AlignLeft)
-            outer.addWidget(time_label)
+            self.time_label = QLabel(time_str)
+            self.time_label.setStyleSheet(TIMESTAMP_LEFT_STYLE)
+            self.time_label.setAlignment(Qt.AlignLeft)
+            outer.addWidget(self.time_label)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+    def set_model_label(self, label_text):
+        """어시스턴트 말풍선의 타임스탬프 앞에 모델 식별자를 추가합니다."""
+        if hasattr(self, "time_label"):
+            current_time = datetime.datetime.now().strftime("%H:%M")
+            self.time_label.setText(f"{label_text} • {current_time}")
 
     def update_text(self, text):
         """스트리밍 중인 어시스턴트 말풍선 내용을 비동기로 갱신합니다."""

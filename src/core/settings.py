@@ -1,4 +1,4 @@
-﻿"""애플리케이션 환경설정을 읽는 공용 모듈입니다.
+"""애플리케이션 환경설정을 읽는 공용 모듈입니다.
 
 민감정보나 환경별 설정값을 소스코드에 직접 넣지 않고
 프로젝트 루트의 .env 파일에서 읽어오도록 합니다.
@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENV_LOADED = False
 
 
-DEFAULT_OLLAMA_MODEL_NAME = "llama3.1:8b"
+DEFAULT_OLLAMA_MODEL_NAME = "llama3.2"
 DEFAULT_EVERYTHING_PORT = 8888
 DEFAULT_RAG_COLLECTION_NAME = "jarvis_docs"
 DEFAULT_RAG_EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -97,3 +97,19 @@ def get_rag_collection_name() -> str:
 def get_rag_embedding_model() -> str:
     """RAG 임베딩 모델명을 반환합니다."""
     return get_env("RAG_EMBEDDING_MODEL", DEFAULT_RAG_EMBEDDING_MODEL)
+
+
+def get_gemini_api_key() -> str | None:
+    """Google Gemini API 키를 반환합니다."""
+    return get_env("GEMINI_API_KEY")
+
+
+def get_gemini_model_name() -> str:
+    """사용할 Gemini 모델명을 반환합니다."""
+    return get_env("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+
+
+def get_default_llm_provider() -> str:
+    """기본 LLM Provider를 반환합니다 (ollama 또는 gemini)."""
+    return get_env("LLM_PROVIDER", "ollama")
+

@@ -15,6 +15,7 @@ from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -39,7 +40,12 @@ from app.chat_response_worker import ChatResponseWorker
 from app.chat_session import ChatSession
 from app.chat_stream_state import ChatStreamState
 from core.paths import resource_path, writable_path
-from core.settings import get_ollama_model_name
+from core.settings import (
+    get_ollama_model_name,
+    get_gemini_api_key,
+    get_gemini_model_name,
+    get_default_llm_provider,
+)
 from core.request_routing import classify_user_request, looks_like_error_report
 from repositories.chat_repository import ChatRepository, DEFAULT_CHAT_TITLE, make_title
 from services.file_action_service import copy_path_to_desktop, move_path_to_recycle_bin
@@ -77,6 +83,8 @@ logging.disable(logging.WARNING)
 warnings.filterwarnings("ignore")
 
 OLLAMA_MODEL_NAME = get_ollama_model_name()
+GEMINI_MODEL_NAME = get_gemini_model_name()
+DEFAULT_LLM_PROVIDER = get_default_llm_provider()
 CHAT_STORAGE_DIR = writable_path("chats")
 
 SYSTEM_PROMPT = """당신은 세계 최고 수준의 한국어 AI 어시스턴트이자 수석 엔지니어 비서입니다.
@@ -309,10 +317,61 @@ class JarvisMainWindow(QMainWindow):
         self.everything_badge.setStyleSheet(STATUS_BADGE_IDLE_STYLE)
         header_layout.addWidget(self.everything_badge)
 
-        model_badge = QLabel(OLLAMA_MODEL_NAME)
-        model_badge.setStyleSheet(STATUS_BADGE_IDLE_STYLE)
-        header_layout.addWidget(model_badge)
+        self.model_selector = QComboBox()
+        model_selector_style = """
+            QComboBox {
+                background-color: #2C2F36;
+                color: #A0A5B5;
+                border: 1px solid #3E4451;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2C2F36;
+                color: #A0A5B5;
+                selection-background-color: #3E4451;
+                border: 1px solid #3E4451;
+            }
+        """
+        self.model_selector.setStyleSheet(model_selector_style)
+        self.model_selector.addItem(f"{OLLAMA_MODEL_NAME} (Local)", {"provider": "ollama", "model": OLLAMA_MODEL_NAME})
+        self.model_selector.addItem("Gemini 2.5 Flash (API)", {"provider": "gemini", "model": "gemini-2.5-flash"})
+        
+        if DEFAULT_LLM_PROVIDER == "gemini":
+            self.model_selector.setCurrentIndex(1)
+        else:
+            self.model_selector.setCurrentIndex(0)
+            
+        self.model_selector.currentIndexChanged.connect(self.handle_model_changed)
+        header_layout.addWidget(self.model_selector)
         return header
+
+    def handle_model_changed(self, index):
+        """모델 스위칭 시 API 키가 필요한 경우 예외를 검증합니다."""
+        data = self.model_selector.itemData(index)
+        if not data:
+            return
+        
+        if data["provider"] == "gemini":
+            api_key = get_gemini_api_key()
+            if not api_key:
+                QMessageBox.warning(
+                    self,
+                    "API 키 누락",
+                    "Gemini 모델을 사용하려면 프로젝트 루트의 .env 파일에\n"
+                    "GEMINI_API_KEY=발급받은키\n"
+                    "형태로 API 키를 등록해야 합니다.\n\n"
+                    "로컬 모델 모드로 복구합니다."
+                )
+                # 이전 상태(Ollama, 0번 인덱스)로 롤백
+                self.model_selector.blockSignals(True)
+                self.model_selector.setCurrentIndex(0)
+                self.model_selector.blockSignals(False)
 
     def _build_message_scroll_area(self):
         """Build the message scroll area."""
@@ -364,6 +423,19 @@ class JarvisMainWindow(QMainWindow):
     def append_assistant_message(self, text, save_to_session=True):
         """Append an assistant message bubble."""
         bubble = ChatMessageBubble(text, False)
+        
+        # 응답 모델 라벨 표시
+        if text == WELCOME_MESSAGE:
+            bubble.set_model_label("🤖 Jarvis")
+        elif getattr(self, "response_worker", None):
+            provider = getattr(self.response_worker, "provider", "ollama")
+            if provider == "gemini":
+                model_label = "🤖 Gemini API"
+            else:
+                model_label = "🦙 Llama 3.2 (Local)"
+            bubble.set_model_label(model_label)
+            bubble.setProperty("model_label", model_label)
+            
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
         if save_to_session and text != "...":
             self.chat_session.append_assistant_message(text)
@@ -421,9 +493,14 @@ class JarvisMainWindow(QMainWindow):
             self.save_current_chat()
             self._insert_chat_list_item_at_top(self.chat_session.current_chat_id, title)
 
+        model_data = self.model_selector.currentData()
+        provider = model_data.get("provider", "ollama")
+        model_name = model_data.get("model", OLLAMA_MODEL_NAME)
+
         self.response_worker = ChatResponseWorker(
             list(self.chat_session.messages),
-            OLLAMA_MODEL_NAME,
+            provider,
+            model_name,
             SYSTEM_PROMPT,
         )
         self.response_worker.finished.connect(self.handle_response_finished)
@@ -491,7 +568,19 @@ class JarvisMainWindow(QMainWindow):
     def handle_stream_token(self, token):
         """Buffer stream tokens and start typing timer."""
         if not self.stream_state.bubble:
-            self.stream_state.start_stream(self._append_temporary_assistant_bubble(""))
+            bubble = self._append_temporary_assistant_bubble("")
+            self.stream_state.start_stream(bubble)
+            
+            # 응답이 실제로 시작되는 시점에 현재 Worker가 사용하는 모델을 UI에 각인시킵니다.
+            if self.response_worker:
+                provider = getattr(self.response_worker, "provider", "ollama")
+                if provider == "gemini":
+                    model_label = f"🤖 Gemini API"
+                else:
+                    model_label = f"🦙 Llama 3.2 (Local)"
+                bubble.set_model_label(model_label)
+                bubble.setProperty("model_label", model_label) # 상태 저장을 위해 속성으로도 저장
+
         self.stream_state.append_chunk(token)
         if not self._stream_flush_timer.isActive():
             self._stream_flush_timer.start(15)  # 15ms 간격으로 더 기민하게 반응

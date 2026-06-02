@@ -327,7 +327,7 @@ def _build_weather_queries(query):
     """
     # base query에 이미 '날씨/기온/현재' 등이 붙어 있으면 중복으로 더 붙지 않게 정리
     base = re.sub(r"\s+", " ", (query or "").strip())
-    base = re.sub(r"(현재\s*)?(날씨|기온|온도)\s*$", "", base).strip()
+    base = re.sub(r"(현재|지금|오늘|날씨|기온|온도)\s*", " ", base).strip()
     is_forecast = _is_forecast_weather_query(query)
     if is_forecast:
         candidates = [

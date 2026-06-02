@@ -1,4 +1,4 @@
-﻿"""Stock quote/analysis service built on yfinance.
+"""Stock quote/analysis service built on yfinance.
 
 This module keeps stock parsing deterministic:
 - price lookup requests -> direct quote text
@@ -191,8 +191,25 @@ def run_stock_quote(query: str) -> tuple[Optional[str], Optional[str]]:
             return None, "가격 데이터를 가져오지 못했습니다."
 
         close = df["Close"]
-        current = float(close.iloc[-1])
-        prev = float(close.iloc[-2]) if len(close) > 1 else current
+        
+        is_yesterday = "어제" in query or "전일" in query
+        is_day_before = "그제" in query or "그저께" in query
+        
+        if is_day_before and len(close) > 3:
+            target_date = df.index[-3].strftime('%Y-%m-%d')
+            current = float(close.iloc[-3])
+            prev = float(close.iloc[-4])
+            time_label = f"그제({target_date}) 종가"
+        elif is_yesterday and len(close) > 2:
+            target_date = df.index[-2].strftime('%Y-%m-%d')
+            current = float(close.iloc[-2])
+            prev = float(close.iloc[-3])
+            time_label = f"어제({target_date}) 종가"
+        else:
+            current = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) > 1 else current
+            time_label = "현재가(최근 종가)"
+
         change = current - prev
         change_pct = (change / prev * 100) if prev else 0.0
 
@@ -206,8 +223,8 @@ def run_stock_quote(query: str) -> tuple[Optional[str], Optional[str]]:
 
         text = (
             f"[{company_name} ({ticker_code})]\\n"
-            f"현재가: {price}\n"
-            f"전일 대비: {delta} ({change_pct:+.2f}%)"
+            f"{time_label}: {price}\n"
+            f"직전 거래일 대비: {delta} ({change_pct:+.2f}%)"
         )
         return text, None
     except Exception as exc:

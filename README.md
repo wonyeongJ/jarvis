@@ -27,7 +27,8 @@ Jarvis는 Windows 환경에서 업무 효율을 높여주는 개인용 AI 도우
 
 **AI & NLP**
 
-- **Ollama (`llama3.1:8b` → gemma3:4b)**: 로컬 언어 모델 코어, GPU 사양이 낮아 더 가벼운 모델로 변경됨
+- **Gemini (`gemini-2.5-flash`)**: 메인 언어 모델 코어 (API 연동). 로컬 GPU 사양 한계를 극복하고 초고속 응답을 제공합니다.
+- **Ollama (`llama3.2`)**: 오프라인/로컬용 예비(Fallback) 언어 모델. CPU 환경에 최적화된 경량 모델입니다.
 - **ChromaDB**: 문서 검색을 위한 벡터 데이터베이스
 - **SentenceTransformers**: 텍스트 문맥 분석 및 실시간 임베딩
 
@@ -45,7 +46,7 @@ Jarvis는 Windows 환경에서 업무 효율을 높여주는 개인용 AI 도우
 
 개발 환경 설정이 번거롭다면 빌드된 파일을 바로 사용하세요.
 
-1. **Ollama 설치**: `https://ollama.com`에서 다운로드 후 터미널에서 `ollama pull gemma3:4b` 실행
+1. **Ollama (선택)**: `https://ollama.com`에서 다운로드 후 터미널에서 `ollama pull llama3.2` 실행 (로컬 모델 사용 시에만 필요)
 2. **Jarvis 실행**: 배포 폴더 내의 `jarvis.exe` 실행
 
 ### 🥈 개발자용 (소스 구현)
@@ -73,6 +74,19 @@ python jarvis.py
 - **주식 지표 확인**: "`삼성전자 분석해줘`", "`RSI 알려줘`" 등으로 질문하면 기술적 지표를 수치로 환산해 해석해 줍니다.
 - **사내 문서 질문**: "회사 연차 규정 알려줘"처럼 data 폴더에 있는 PDF 내용을 바탕으로 규칙을 찾아줍니다.
 - **PC 파일 탐색**: "2024년 기획서 파일 찾아줘"라고 하면 컴퓨터 내의 관련 파일을 리스트로 보여줍니다.
+
+---
+
+## 🤖 3.5. Gemini 3.5 Flash 원격 모델 연동
+
+로컬 AI 모델(`gemma3:4b`) 외에도 Google의 **Gemini 3.5 Flash** 클라우드 모델을 사용할 수 있습니다.
+
+1. **API 키 발급**: [Google AI Studio](https://aistudio.google.com/)에서 API 키를 발급받습니다.
+2. **환경변수 등록**: 프로젝트 루트의 `.env` 파일에 발급받은 키를 기입합니다.
+   ```env
+   GEMINI_API_KEY=AIzaSy...
+   ```
+3. **모델 스위칭**: Jarvis 앱 실행 후 우측 상단의 모델 선택 드롭다운 상자에서 **`gemma3:4b (Local)`** 또는 **`Gemini 3.5 Flash (API)`**를 실시간으로 전환하며 대화하실 수 있습니다.
 
 ---
 

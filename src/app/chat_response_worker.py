@@ -11,6 +11,7 @@ import re
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from core.settings import get_gemini_api_key
 from core.request_routing import classify_user_request, summarize_project_folder
 from services.search_facade import (
     is_everything_available,
@@ -47,10 +48,11 @@ class ChatResponseWorker(QThread):
     pc_failed = pyqtSignal(str)
     file_action = pyqtSignal(str, str)
 
-    def __init__(self, history, model_name, system_prompt):
+    def __init__(self, history, provider, model_name, system_prompt):
         """대화 이력과 모델 설정을 보관합니다."""
         super().__init__()
         self.history = history
+        self.provider = provider
         self.model_name = model_name
         self.system_prompt = system_prompt
         self.regex_mode = False
@@ -249,71 +251,152 @@ class ChatResponseWorker(QThread):
                     return
 
         messages = self._build_messages(last_user_message, now_str, request_type, document_context, search_result)
-        payload = {"model": self.model_name, "messages": messages, "stream": True, "options": OLLAMA_MEMORY_SAVER_OPTIONS}
+        full_response = ""
 
-        try:
-            response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120, stream=True)
-            response.raise_for_status()
-            full_response = ""
-            for line in response.iter_lines():
-                if not line:
-                    continue
-                chunk = json.loads(line)
-                token = chunk.get("message", {}).get("content", "")
-                full_response += token
-                self.streaming.emit(token)
-                if chunk.get("done"):
-                    break
+        if self.provider == "gemini":
+            api_key = get_gemini_api_key()
+            if not api_key:
+                self.finished.emit("Jarvis 오류: Gemini API 키가 설정되지 않았습니다. .env 파일을 확인해 주세요.")
+                return
 
-            if full_response.strip():
-                final_text = full_response.strip()
-                # 날씨 응답은 지역/시점 누락이 잦아, 사용자 질문 기반으로 접두사를 보강합니다.
-                if self._is_weather_query(last_user_message):
-                    location_hint = self._extract_weather_location_hint(last_user_message) or "해당 지역"
-                    when = "내일" if self._is_forecast_weather_query(last_user_message) else "현재"
-                    # 모델이 질문 지역과 다른 지역을 단정해서 말하는 경우를 차단합니다.
-                    # (예: '세종' 질문인데 '서울 날씨는...' 같은 답변)
-                    if location_hint != "해당 지역":
-                        known_locations = [
-                            "서울", "세종", "대전", "대구", "부산", "인천", "광주", "울산",
-                            "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
-                        ]
-                        mentioned = [loc for loc in known_locations if loc in final_text]
-                        # 답변에 다른 지역이 명시되고, 질문 지역이 포함되지 않으면 오답으로 간주
-                        if mentioned and (location_hint not in final_text):
-                            if any(loc != location_hint for loc in mentioned):
-                                final_text = f"{when} {location_hint} 날씨는 검색 결과에서 확인하지 못했습니다."
-                                self.finished.emit(final_text)
-                                return
-                    # 예보(내일) 요청인데 본문이 '현재' 데이터만 포함하면 모순이 발생합니다.
-                    # 이 경우 예보 정보를 확인하지 못한 것으로 처리합니다.
-                    if when == "내일":
-                        # '내일' 단어만으로는 예보 근거가 되지 않습니다(접두사/되풀이로 쉽게 포함됨).
-                        # 예보임을 나타내는 구체 표식이 있어야만 예보 응답으로 인정합니다.
-                        # '%'는 습도에도 포함되어 예보로 오인되기 쉬워 제외합니다.
-                        forecast_markers = ["오전", "오후", "시간별", "최저", "최고", "강수", "mm", "확률"]
-                        current_markers = ["현재", "현재 기온", "현재온도"]
-                        has_forecast_marker = any(m in final_text for m in forecast_markers)
-                        has_current_marker = any(m in final_text for m in current_markers)
-                        if has_current_marker and not has_forecast_marker:
-                            final_text = f"내일 {location_hint} 날씨는 검색 결과에서 예보 정보를 확인하지 못했습니다."
+            gemini_contents = []
+            system_instruction_text = None
+            for msg in messages:
+                role = msg["role"]
+                content = msg["content"]
+                if role == "system":
+                    system_instruction_text = content
+                else:
+                    gemini_role = "user" if role == "user" else "model"
+                    gemini_contents.append({
+                        "role": gemini_role,
+                        "parts": [{"text": content}]
+                    })
+
+            payload = {
+                "contents": gemini_contents,
+                "generationConfig": {
+                    "temperature": 0.7
+                }
+            }
+            # 일반 대화·간단한 질문은 thinking을 비활성화해 응답 속도를 높입니다.
+            # 웹 검색·코드·SQL·분석 등 복잡한 작업은 thinking을 유지합니다.
+            _is_simple_task = request_type in ("error", "dev") or (request_type is None and not self.regex_mode and not is_stock_analysis_query(last_user_message) and not self._is_weather_query(last_user_message))
+            if _is_simple_task:
+                payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+                payload["generationConfig"]["maxOutputTokens"] = 500
+
+            if system_instruction_text:
+                payload["systemInstruction"] = {
+                    "parts": [{"text": system_instruction_text}]
+                }
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:streamGenerateContent?alt=sse&key={api_key}"
+            try:
+                response = requests.post(url, json=payload, timeout=180, stream=True)
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if line_str.startswith("data:"):
+                        data_json = line_str[5:].strip()
+                        if data_json == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_json)
+                            token = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            full_response += token
+                            self.streaming.emit(token)
+                        except Exception:
+                            pass
+            except Exception as error:
+                error_str = str(error)
+                error_desc = "연결 오류 발생"
+                if "429" in error_str or "Too Many Requests" in error_str:
+                    error_desc = "호출 한도 초과(429)"
+                elif "503" in error_str or "Service Unavailable" in error_str:
+                    error_desc = "서버 점검/응답 없음(503)"
+                elif "400" in error_str:
+                    error_desc = "잘못된 요청(400)"
+                elif "401" in error_str or "403" in error_str:
+                    error_desc = "인증 실패/권한 없음(401/403)"
+                elif "timeout" in error_str.lower() or "read timeout" in error_str.lower():
+                    error_desc = "응답 시간 초과(Timeout)"
+                else:
+                    # 기타 오류는 문자열 일부 노출
+                    error_desc = f"오류 발생({error_str[:30]}...)"
+                
+                self.streaming.emit(f"\n\n⚠️ Gemini API {error_desc} - 로컬 모델(Ollama)로 자동 전환합니다...\n\n")
+                self.provider = "ollama"
+                self.model_name = "llama3.2" # default fallback
+                full_response = ""
+
+        if self.provider == "ollama":
+            payload = {"model": self.model_name, "messages": messages, "stream": True, "options": OLLAMA_MEMORY_SAVER_OPTIONS}
+            try:
+                response = requests.post("http://localhost:11434/api/chat", json=payload, timeout=120, stream=True)
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    token = chunk.get("message", {}).get("content", "")
+                    full_response += token
+                    self.streaming.emit(token)
+                    if chunk.get("done"):
+                        break
+            except Exception as error:
+                self.finished.emit(f"Jarvis 오류: Ollama 연결에 실패했습니다.\n\n{error}")
+                return
+
+        if full_response.strip():
+            final_text = full_response.strip()
+            # 날씨 응답은 지역/시점 누락이 잦아, 사용자 질문 기반으로 접두사를 보강합니다.
+            if self._is_weather_query(last_user_message):
+                location_hint = self._extract_weather_location_hint(last_user_message) or "해당 지역"
+                when = "내일" if self._is_forecast_weather_query(last_user_message) else "현재"
+                # 모델이 질문 지역과 다른 지역을 단정해서 말하는 경우를 차단합니다.
+                # (예: '세종' 질문인데 '서울 날씨는...' 같은 답변)
+                if location_hint != "해당 지역":
+                    known_locations = [
+                        "서울", "세종", "대전", "대구", "부산", "인천", "광주", "울산",
+                        "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주",
+                    ]
+                    mentioned = [loc for loc in known_locations if loc in final_text]
+                    # 답변에 다른 지역이 명시되고, 질문 지역이 포함되지 않으면 오답으로 간주
+                    if mentioned and (location_hint not in final_text):
+                        if any(loc != location_hint for loc in mentioned):
+                            final_text = f"{when} {location_hint} 날씨는 검색 결과에서 확인하지 못했습니다."
                             self.finished.emit(final_text)
                             return
-                    needs_location = location_hint not in final_text
-                    needs_when = when not in final_text
-                    if needs_location or needs_when:
-                        prefix = f"{when} {location_hint} 날씨: "
-                        final_text = prefix + final_text.lstrip()
+                # 예보(내일) 요청인데 본문이 '현재' 데이터만 포함하면 모순이 발생합니다.
+                # 이 경우 예보 정보를 확인하지 못한 것으로 처리합니다.
+                if when == "내일":
+                    # '내일' 단어만으로는 예보 근거가 되지 않습니다(접두사/되풀이로 쉽게 포함됨).
+                    # 예보임을 나타내는 구체 표식이 있어야만 예보 응답으로 인정합니다.
+                    # '%'는 습도에도 포함되어 예보로 오인되기 쉬워 제외합니다.
+                    forecast_markers = ["오전", "오후", "시간별", "최저", "최고", "강수", "mm", "확률"]
+                    current_markers = ["현재", "현재 기온", "현재온도"]
+                    has_forecast_marker = any(m in final_text for m in forecast_markers)
+                    has_current_marker = any(m in final_text for m in current_markers)
+                    if has_current_marker and not has_forecast_marker:
+                        final_text = f"내일 {location_hint} 날씨는 검색 결과에서 예보 정보를 확인하지 못했습니다."
+                        self.finished.emit(final_text)
+                        return
+                needs_location = location_hint not in final_text
+                needs_when = when not in final_text
+                if needs_location or needs_when:
+                    prefix = f"{when} {location_hint} 날씨: "
+                    final_text = prefix + final_text.lstrip()
 
-                    # 사용자가 데이터 검증을 할 수 있도록 스크래핑 URL을 함께 노출합니다.
-                    source_url = self._extract_search_source_url(search_result)
-                    if source_url and "출처:" not in final_text:
-                        final_text += f"\n\n출처: {source_url}"
-                self.finished.emit(final_text)
-            else:
-                self.finished.emit("응답을 생성하지 못했습니다. 다시 한 번 요청해 주세요.")
-        except Exception as error:
-            self.finished.emit(f"Jarvis 오류: Ollama 연결에 실패했습니다.\n\n{error}")
+                # 사용자가 데이터 검증을 할 수 있도록 스크래핑 URL을 함께 노출합니다.
+                source_url = self._extract_search_source_url(search_result)
+                if source_url and "출처:" not in final_text:
+                    final_text += f"\n\n출처: {source_url}"
+            self.finished.emit(final_text)
+        else:
+            self.finished.emit("응답을 생성하지 못했습니다. 다시 한 번 요청해 주세요.")
 
     def _is_stock_dependency_error(self, error_message: str) -> bool:
         """yfinance 의존성 관련 오류 여부를 판단합니다."""
@@ -763,7 +846,8 @@ class ChatResponseWorker(QThread):
             "3. '조치원 말고 고운동' 처럼 비교나 정정 표현이 있으면 최종 목적지인 지역만 남기세요.\n"
             "4. 이전 대화에서 날씨를 묻고 있었다면, 이번 질문에 '날씨' 단어가 없어도 자동으로 '날씨' 키워드를 붙이세요.\n"
             "5. 사용자가 '내일/모레/주간/예보/시간별'을 요청했다면 해당 키워드를 반드시 검색어에 포함하세요. (예: '내일 고운동 날씨' -> '세종 고운동 내일 날씨')\n"
-            "6. 불필요한 수식어나 '알려줘', '어때?' 같은 문장은 모두 제외하고 검색어만 단답형으로 응답하세요.\n\n"
+            "6. 주식 종목에 대해 '분석', '예측', '전망', 'rsi', 'macd' 등을 요청했다면 해당 키워드를 반드시 검색어에 포함하세요. (예: '삼성전자 주가 분석해줘' -> '삼성전자 주가 분석')\n"
+            "7. 불필요한 수식어나 '알려줘', '어때?' 같은 문장은 모두 제외하고 검색어만 단답형으로 응답하세요.\n\n"
             f"사용자 질문: {query}\n"
             "검색어:"
         )
